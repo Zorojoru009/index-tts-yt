@@ -194,9 +194,11 @@ def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
                   progress=gr.Progress()):
     """Preload voice embeddings to speed up generation"""
     if not prompt_audio:
-        return "❌ " + i18n("Please upload a voice reference audio first")
+        yield "❌ " + i18n("Please upload a voice reference audio first")
+        return
     
     try:
+        yield "⏳ " + i18n("Analyzing voice...")
         progress(0.1, desc="Analyzing voice...")
         
         # Determine emotion control method
@@ -216,10 +218,12 @@ def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
             emo_vector = tts.normalize_emo_vec(vec, apply_bias=True)
         elif emo_control_method == 3:  # emotion from text
             if emo_text and emo_text.strip():
+                yield "⏳ " + i18n("Analyzing emotion text...")
                 progress(0.2, desc="Analyzing emotion text...")
                 emo_dict = tts.qwen_emo.inference(emo_text)
                 emo_vector = list(emo_dict.values())
         
+        yield "⏳ " + i18n("Caching embeddings...")
         progress(0.4, desc="Caching embeddings...")
         
         # Trigger voice analysis by calling a minimal inference
@@ -243,10 +247,10 @@ def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
         )
         
         progress(1.0, desc="Done!")
-        return "✅ " + i18n("Voice preloaded, ready to generate")
+        yield "✅ " + i18n("Voice preloaded, ready to generate")
     except Exception as e:
         print(f"Preload error: {e}")
-        return f"❌ " + i18n("Preload failed") + f": {str(e)}"
+        yield f"❌ " + i18n("Preload failed") + f": {str(e)}"
 
 def gen_single_streaming(emo_control_method, prompt, text,
                         emo_ref_path, emo_weight,
@@ -309,13 +313,13 @@ def gen_single_streaming(emo_control_method, prompt, text,
     # Show initial log
     yield {
         streaming_log: gr.update(value="\n".join(log_lines), visible=True),
-        output_audio: None
+        output_audio: None,
+        download_file: None
     }
     
     # Start streaming generation
     start_time = time.time()
     chunk_times = []
-    accumulated_audio = []
     
     try:
         generator = tts.infer_generator(
@@ -337,42 +341,53 @@ def gen_single_streaming(emo_control_method, prompt, text,
         chunk_idx = 0
         for item in generator:
             if isinstance(item, torch.Tensor):
-                # This is an audio chunk
-                chunk_end_time = time.time()
-                chunk_duration = chunk_end_time - start_time if chunk_idx == 0 else chunk_end_time - chunk_times[-1]
-                chunk_times.append(chunk_end_time)
+                # Check if this is a silence chunk (all zeros)
+                is_silence = torch.all(item == 0)
                 
                 # Calculate metrics
+                chunk_end_time = time.time()
+                # For silence chunks, we don't advance the main timer/metrics the same way, 
+                # or we just treat them as part of the flow. 
+                # Let's count them in time but not as a "Text Chunk".
+                
                 audio_duration = item.shape[-1] / 22050  # assuming 22050 Hz
-                rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
-                avg_rtf = sum([(chunk_times[i] - (chunk_times[i-1] if i > 0 else start_time)) for i in range(len(chunk_times))]) / ((chunk_end_time - start_time) / len(chunk_times)) if chunk_times else 0
                 
-                # Update log
-                chunk_idx += 1
-                segment_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else ""
-                log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed in {chunk_duration:.2f}s")
-                log_lines.append(f"   📊 RTF: {rtf:.4f} | Audio: {audio_duration:.2f}s")
-                log_lines.append(f"   📝 Text: {segment_text[:50]}{'...' if len(segment_text) > 50 else ''}")
-                
-                # Estimate remaining time
-                if chunk_idx < total_segments:
-                    avg_chunk_time = (chunk_end_time - start_time) / chunk_idx
-                    remaining_time = avg_chunk_time * (total_segments - chunk_idx)
-                    log_lines.append(f"   ⏱️ Est. remaining: {remaining_time:.1f}s")
-                
-                log_lines.append("-" * 50)
+                if not is_silence:
+                    chunk_idx += 1
+                    chunk_duration = chunk_end_time - start_time if chunk_idx == 1 else chunk_end_time - chunk_times[-1]
+                    chunk_times.append(chunk_end_time)
+                    
+                    rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
+                    
+                    # Get segment text and clean it
+                    raw_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else ""
+                    segment_text = raw_text.replace(' ', ' ').replace(' ', ' ')  # Replace sentence piece underscore with space
+                    
+                    log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed in {chunk_duration:.2f}s")
+                    log_lines.append(f"   📊 RTF: {rtf:.4f} | Audio: {audio_duration:.2f}s")
+                    log_lines.append(f"   📝 Text: {segment_text[:50]}{'...' if len(segment_text) > 50 else ''}")
+                    
+                    # Estimate remaining time
+                    if chunk_idx < total_segments:
+                        avg_chunk_time = (chunk_end_time - start_time) / chunk_idx
+                        remaining_time = avg_chunk_time * (total_segments - chunk_idx)
+                        log_lines.append(f"   ⏱️ Est. remaining: {remaining_time:.1f}s")
+                    
+                    log_lines.append("-" * 50)
                 
                 # Keep log manageable (last 100 lines)
                 if len(log_lines) > 100:
                     log_lines = log_lines[-100:]
                 
-                # Yield updates
+                # Yield updates (yield both audio and silence to player)
                 yield {
                     streaming_log: gr.update(value="\n".join(log_lines)),
-                    output_audio: (22050, item.numpy().T) if hasattr(item, 'numpy') else item
+                    output_audio: (22050, item.numpy().T) if hasattr(item, 'numpy') else item,
+                    download_file: None
                 }
         
         # Final summary
+        avg_rtf = sum([(chunk_times[i] - (chunk_times[i-1] if i > 0 else start_time)) for i in range(len(chunk_times))]) / ((chunk_times[-1] - start_time) / len(chunk_times)) if chunk_times else 0
         total_time = time.time() - start_time
         log_lines.append("=" * 50)
         log_lines.append(f"🎉 Generation complete!")
@@ -381,9 +396,12 @@ def gen_single_streaming(emo_control_method, prompt, text,
         log_lines.append(f"💾 Saved to: {output_path}")
         log_lines.append("=" * 50)
         
+        # NOTE: Do NOT yield output_path to output_audio, as it causes repetition in streaming mode
+        # Instead, yield it to download_file component
         yield {
             streaming_log: gr.update(value="\n".join(log_lines)),
-            output_audio: output_path
+            output_audio: None,
+            download_file: output_path
         }
         
     except Exception as e:
@@ -392,7 +410,8 @@ def gen_single_streaming(emo_control_method, prompt, text,
         log_lines.append("=" * 50)
         yield {
             streaming_log: gr.update(value="\n".join(log_lines)),
-            output_audio: None
+            output_audio: None,
+            download_file: None
         }
 
 def gen_wrapper(streaming_mode, emo_control_method, prompt, text,
@@ -424,7 +443,8 @@ def gen_wrapper(streaming_mode, emo_control_method, prompt, text,
         )
         yield {
             streaming_log: gr.update(value="", visible=False),
-            output_audio: result
+            output_audio: result,
+            download_file: result  # In batch mode, result is the file path
         }
 
 def update_prompt_audio():
@@ -461,7 +481,9 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     preload_voice_btn = gr.Button("🔄 " + i18n("Preload Voice"), scale=1, variant="secondary")
                     gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True, scale=2, variant="primary")
                 voice_status = gr.Markdown("⏳ " + i18n("Voice not preloaded"))
-            output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio", streaming=True)
+            with gr.Column():
+                output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio", streaming=True)
+                download_file = gr.File(label=i18n("Download Audio"), visible=True)
         
         with gr.Row():
             streaming_log = gr.Textbox(
@@ -826,7 +848,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 max_text_tokens_per_segment,
                 *advanced_params,
         ],
-        outputs=[streaming_log, output_audio]
+        outputs=[streaming_log, output_audio, download_file]
     )
 
 
