@@ -50,6 +50,7 @@ for file in [
         sys.exit(1)
 
 import gradio as gr
+import torch
 from indextts.infer_v2 import IndexTTS2
 from tools.i18n.i18n import I18nAuto
 
@@ -188,6 +189,237 @@ def gen_single(emo_control_method,prompt, text,
                        **kwargs)
     return gr.update(value=output,visible=True)
 
+def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
+                  vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text):
+    """Preload voice embeddings to speed up generation"""
+    if not prompt_audio:
+        return "❌ " + i18n("请先上传音色参考音频")
+    
+    try:
+        # Determine emotion control method
+        if type(emo_control_method) is not int:
+            emo_control_method = emo_control_method.value
+        
+        # Set up emotion reference
+        emo_ref_path = None
+        emo_vector = None
+        
+        if emo_control_method == 0:  # emotion from speaker
+            emo_ref_path = None
+        elif emo_control_method == 1:  # emotion from reference audio
+            emo_ref_path = emo_upload
+        elif emo_control_method == 2:  # emotion from custom vectors
+            vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+            emo_vector = tts.normalize_emo_vec(vec, apply_bias=True)
+        elif emo_control_method == 3:  # emotion from text
+            if emo_text and emo_text.strip():
+                emo_dict = tts.qwen_emo.inference(emo_text)
+                emo_vector = list(emo_dict.values())
+        
+        # Trigger voice analysis by calling a minimal inference
+        # This will populate the cache without generating audio
+        dummy_text = "测试"  # Short test text
+        tts.infer(
+            spk_audio_prompt=prompt_audio,
+            text=dummy_text,
+            output_path=None,
+            emo_audio_prompt=emo_ref_path if emo_ref_path else prompt_audio,
+            emo_alpha=emo_weight,
+            emo_vector=emo_vector,
+            verbose=False,
+            max_text_tokens_per_segment=20,
+            stream_return=False,
+            do_sample=True,
+            temperature=0.8,
+            top_p=0.8,
+            top_k=30,
+            max_mel_tokens=100  # Very short to just trigger caching
+        )
+        
+        return "✅ " + i18n("音色已预加载，可以开始生成")
+    except Exception as e:
+        print(f"Preload error: {e}")
+        return f"❌ " + i18n("预加载失败") + f": {str(e)}"
+
+def gen_single_streaming(emo_control_method, prompt, text,
+                        emo_ref_path, emo_weight,
+                        vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                        emo_text, emo_random,
+                        max_text_tokens_per_segment=120,
+                        *args, progress=gr.Progress()):
+    """Streaming generation with real-time progress updates"""
+    output_path = None
+    if not output_path:
+        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
+    
+    # set gradio progress
+    tts.gr_progress = progress
+    do_sample, top_p, top_k, temperature, \
+        length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
+    kwargs = {
+        "do_sample": bool(do_sample),
+        "top_p": float(top_p),
+        "top_k": int(top_k) if int(top_k) > 0 else None,
+        "temperature": float(temperature),
+        "length_penalty": float(length_penalty),
+        "num_beams": num_beams,
+        "repetition_penalty": float(repetition_penalty),
+        "max_mel_tokens": int(max_mel_tokens),
+    }
+    
+    if type(emo_control_method) is not int:
+        emo_control_method = emo_control_method.value
+    if emo_control_method == 0:  # emotion from speaker
+        emo_ref_path = None  # remove external reference audio
+    if emo_control_method == 1:  # emotion from reference audio
+        pass
+    if emo_control_method == 2:  # emotion from custom vectors
+        vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+        vec = tts.normalize_emo_vec(vec, apply_bias=True)
+    else:
+        # don't use the emotion vector inputs for the other modes
+        vec = None
+
+    if emo_text == "":
+        # erase empty emotion descriptions; `infer()` will then automatically use the main prompt
+        emo_text = None
+
+    print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
+    
+    # Calculate segments for progress tracking
+    text_tokens_list = tts.tokenizer.tokenize(text)
+    segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
+    total_segments = len(segments)
+    
+    # Initialize log
+    log_lines = []
+    log_lines.append(f"🎙️ Starting generation...")
+    log_lines.append(f"📊 Total segments: {total_segments}")
+    log_lines.append(f"📝 Text length: {len(text)} characters, {len(text_tokens_list)} tokens")
+    log_lines.append(f"⚙️ Chunk size: {max_text_tokens_per_segment} tokens/segment")
+    log_lines.append("-" * 50)
+    
+    # Show initial log
+    yield {
+        streaming_log: gr.update(value="\n".join(log_lines), visible=True),
+        output_audio: None
+    }
+    
+    # Start streaming generation
+    start_time = time.time()
+    chunk_times = []
+    accumulated_audio = []
+    
+    try:
+        generator = tts.infer_generator(
+            spk_audio_prompt=prompt,
+            text=text,
+            output_path=output_path,
+            emo_audio_prompt=emo_ref_path,
+            emo_alpha=emo_weight,
+            emo_vector=vec,
+            use_emo_text=(emo_control_method==3),
+            emo_text=emo_text,
+            use_random=emo_random,
+            verbose=cmd_args.verbose,
+            max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+            stream_return=True,
+            **kwargs
+        )
+        
+        chunk_idx = 0
+        for item in generator:
+            if isinstance(item, torch.Tensor):
+                # This is an audio chunk
+                chunk_end_time = time.time()
+                chunk_duration = chunk_end_time - start_time if chunk_idx == 0 else chunk_end_time - chunk_times[-1]
+                chunk_times.append(chunk_end_time)
+                
+                # Calculate metrics
+                audio_duration = item.shape[-1] / 22050  # assuming 22050 Hz
+                rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
+                avg_rtf = sum([(chunk_times[i] - (chunk_times[i-1] if i > 0 else start_time)) for i in range(len(chunk_times))]) / ((chunk_end_time - start_time) / len(chunk_times)) if chunk_times else 0
+                
+                # Update log
+                chunk_idx += 1
+                segment_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else ""
+                log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed in {chunk_duration:.2f}s")
+                log_lines.append(f"   📊 RTF: {rtf:.4f} | Audio: {audio_duration:.2f}s")
+                log_lines.append(f"   📝 Text: {segment_text[:50]}{'...' if len(segment_text) > 50 else ''}")
+                
+                # Estimate remaining time
+                if chunk_idx < total_segments:
+                    avg_chunk_time = (chunk_end_time - start_time) / chunk_idx
+                    remaining_time = avg_chunk_time * (total_segments - chunk_idx)
+                    log_lines.append(f"   ⏱️ Est. remaining: {remaining_time:.1f}s")
+                
+                log_lines.append("-" * 50)
+                
+                # Keep log manageable (last 100 lines)
+                if len(log_lines) > 100:
+                    log_lines = log_lines[-100:]
+                
+                # Yield updates
+                yield {
+                    streaming_log: gr.update(value="\n".join(log_lines)),
+                    output_audio: (22050, item.numpy().T) if hasattr(item, 'numpy') else item
+                }
+        
+        # Final summary
+        total_time = time.time() - start_time
+        log_lines.append("=" * 50)
+        log_lines.append(f"🎉 Generation complete!")
+        log_lines.append(f"⏱️ Total time: {total_time:.2f}s")
+        log_lines.append(f"📊 Average RTF: {avg_rtf:.4f}")
+        log_lines.append(f"💾 Saved to: {output_path}")
+        log_lines.append("=" * 50)
+        
+        yield {
+            streaming_log: gr.update(value="\n".join(log_lines)),
+            output_audio: output_path
+        }
+        
+    except Exception as e:
+        log_lines.append("=" * 50)
+        log_lines.append(f"❌ Error: {str(e)}")
+        log_lines.append("=" * 50)
+        yield {
+            streaming_log: gr.update(value="\n".join(log_lines)),
+            output_audio: None
+        }
+
+def gen_wrapper(streaming_mode, emo_control_method, prompt, text,
+                emo_ref_path, emo_weight,
+                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                emo_text, emo_random,
+                max_text_tokens_per_segment=120,
+                *args, progress=gr.Progress()):
+    """Wrapper that switches between streaming and non-streaming modes"""
+    if streaming_mode:
+        # Use streaming mode
+        yield from gen_single_streaming(
+            emo_control_method, prompt, text,
+            emo_ref_path, emo_weight,
+            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+            emo_text, emo_random,
+            max_text_tokens_per_segment,
+            *args, progress=progress
+        )
+    else:
+        # Use non-streaming mode
+        result = gen_single(
+            emo_control_method, prompt, text,
+            emo_ref_path, emo_weight,
+            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+            emo_text, emo_random,
+            max_text_tokens_per_segment,
+            *args, progress=progress
+        )
+        yield {
+            streaming_log: gr.update(value="", visible=False),
+            output_audio: result
+        }
+
 def update_prompt_audio():
     update_button = gr.update(interactive=True)
     return update_button
@@ -218,12 +450,30 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 default = prompt_list[0]
             with gr.Column():
                 input_text_single = gr.TextArea(label=i18n("文本"),key="input_text_single", placeholder=i18n("请输入目标文本"), info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
-                gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True)
-            output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio")
+                with gr.Row():
+                    preload_voice_btn = gr.Button("🔄 " + i18n("预加载音色"), scale=1, variant="secondary")
+                    gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True, scale=2, variant="primary")
+                voice_status = gr.Markdown("⏳ " + i18n("音色未预加载"))
+            output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio", streaming=True)
+        
+        with gr.Row():
+            streaming_log = gr.Textbox(
+                label=i18n("生成日志"),
+                lines=8,
+                max_lines=15,
+                interactive=False,
+                visible=False,
+                show_copy_button=True
+            )
 
         with gr.Row():
             experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=False)
             glossary_checkbox = gr.Checkbox(label=i18n("开启术语词汇读音"), value=tts.normalizer.enable_glossary)
+            streaming_mode_checkbox = gr.Checkbox(
+                label=i18n("启用流式生成"), 
+                value=True,
+                info=i18n("推荐用于长文本（5分钟以上），实时显示进度和播放音频")
+            )
         with gr.Accordion(i18n("功能设置")):
             # 情感控制选项部分
             with gr.Row():
@@ -552,14 +802,25 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         outputs=[glossary_table]
     )
 
-    gen_button.click(gen_single,
-                     inputs=[emo_control_method,prompt_audio, input_text_single, emo_upload, emo_weight,
-                            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-                             emo_text,emo_random,
-                             max_text_tokens_per_segment,
-                             *advanced_params,
-                     ],
-                     outputs=[output_audio])
+    # Preload voice button handler
+    preload_voice_btn.click(
+        preload_voice,
+        inputs=[prompt_audio, emo_upload, emo_control_method, emo_weight,
+                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text],
+        outputs=[voice_status]
+    )
+
+    # Generate button with streaming
+    gen_button.click(
+        gen_wrapper,
+        inputs=[streaming_mode_checkbox, emo_control_method, prompt_audio, input_text_single, emo_upload, emo_weight,
+                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                emo_text, emo_random,
+                max_text_tokens_per_segment,
+                *advanced_params,
+        ],
+        outputs=[streaming_log, output_audio]
+    )
 
 
 
