@@ -526,11 +526,14 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
     try:
         # Use distributed inference if multiple GPUs selected
         if len(target_gpus) > 1:
+            # For distributed mode, don't pass output_path to avoid race conditions
+            # We'll save the concatenated file ourselves after all chunks are done
+            print(f">> Using distributed inference on GPUs: {target_gpus}")
             generator = multi_gpu_manager.infer_distributed(
                 target_gpus,
                 text=text,
                 spk_audio_prompt=prompt,
-                output_path=output_path,
+                output_path=None,  # Don't save in distributed mode - we'll concatenate and save after
                 emo_audio_prompt=emo_ref_path,
                 emo_alpha=emo_weight,
                 emo_vector=vec,
@@ -543,7 +546,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                 **kwargs
             )
         else:
-            # Single GPU fallback (legacy path but using manager)
+            # Single GPU - can use model's internal saving
+            print(f">> Using single GPU inference on GPU: {target_gpus[0]}")
             model = multi_gpu_manager.get_model(target_gpus[0])
             generator = model.infer_generator(
                 spk_audio_prompt=prompt,
@@ -562,44 +566,80 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
             )
         
         chunk_idx = 0
+        all_audio_chunks = []  # Accumulate all chunks for final concatenation
+
         for item in generator:
             if isinstance(item, torch.Tensor):
                 # Check silence
                 is_silence = torch.all(item == 0)
                 chunk_end_time = time.time()
                 audio_duration = item.shape[-1] / 22050
-                
+
                 if not is_silence:
                     chunk_idx += 1
                     chunk_duration = chunk_end_time - start_time if chunk_idx == 1 else chunk_end_time - chunk_times[-1]
                     chunk_times.append(chunk_end_time)
-                    
+
                     rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
-                    
+
                     raw_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else ""
                     segment_text = raw_text.replace(' ', ' ').replace(' ', ' ')
-                    
+
                     log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed in {chunk_duration:.2f}s")
                     log_lines.append(f"   📊 RTF: {rtf:.4f} | Audio: {audio_duration:.2f}s")
                     log_lines.append(f"   📝 Text: {segment_text[:50]}...")
-                    
+
                     # Estimate remaining time
                     if chunk_idx < total_segments:
                         # Distributed estimation is tricky, simple linear approx
                         avg_chunk_time = (chunk_end_time - start_time) / chunk_idx
                         remaining_time = avg_chunk_time * (total_segments - chunk_idx) / len(target_gpus) # Simple factor
                         log_lines.append(f"   ⏱️ Est. remaining: {remaining_time:.1f}s")
-                    
+
                     log_lines.append("-" * 50)
-                
+
+                    # Store chunk for final concatenation
+                    if isinstance(item, torch.Tensor):
+                        all_audio_chunks.append(item.cpu())
+                    else:
+                        all_audio_chunks.append(item)
+
                 if len(log_lines) > 100: log_lines = log_lines[-100:]
-                
+
                 yield {
                     streaming_log: gr.update(value="\n".join(log_lines)),
                     output_audio: (22050, item.numpy().T) if hasattr(item, 'numpy') else item,
                     download_file: None
                 }
         
+        # Concatenate all chunks and save to file
+        import soundfile as sf
+
+        if all_audio_chunks:
+            log_lines.append("=" * 50)
+            log_lines.append("🔧 Concatenating audio chunks...")
+
+            # Concatenate all chunks
+            try:
+                concatenated_audio = torch.cat(all_audio_chunks, dim=-1)
+                audio_data = concatenated_audio.numpy() if isinstance(concatenated_audio, torch.Tensor) else concatenated_audio
+
+                # Save to file
+                sf.write(output_path, audio_data, 22050, subtype='PCM_16')
+
+                # Verify file
+                if os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path)
+                    file_duration = len(audio_data) / 22050
+                    log_lines.append(f"✅ Concatenation complete!")
+                    log_lines.append(f"📊 Total samples: {len(audio_data):,}")
+                    log_lines.append(f"⏱️ Duration: {file_duration:.2f}s")
+                    log_lines.append(f"💾 File size: {file_size / 1024:.1f} KB")
+                else:
+                    log_lines.append(f"❌ Error: Failed to save concatenated audio!")
+            except Exception as concat_error:
+                log_lines.append(f"❌ Concatenation error: {str(concat_error)}")
+
         # Final summary
         avg_rtf = sum([(chunk_times[i] - (chunk_times[i-1] if i > 0 else start_time)) for i in range(len(chunk_times))]) / ((chunk_times[-1] - start_time) / len(chunk_times)) if chunk_times else 0
         total_time = time.time() - start_time
@@ -609,7 +649,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         log_lines.append(f"📊 Average RTF: {avg_rtf:.4f}")
         log_lines.append(f"💾 Saved to: {output_path}")
         log_lines.append("=" * 50)
-        
+
         # NOTE: Do NOT yield output_path to output_audio, as it causes repetition in streaming mode
         # Instead, yield it to download_file component
         yield {
@@ -747,15 +787,15 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
             with gr.Row(visible=False) as emo_vec_row:
                  with gr.Column():
-                    vec1 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 1"))
-                    vec2 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 2"))
-                    vec3 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 3"))
-                    vec4 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 4"))
+                    vec1 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Happy"))
+                    vec2 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Angry"))
+                    vec3 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Sad"))
+                    vec4 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Afraid"))
                  with gr.Column():
-                    vec5 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 5"))
-                    vec6 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 6"))
-                    vec7 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 7"))
-                    vec8 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 8"))
+                    vec5 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Disgusted"))
+                    vec6 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Melancholic"))
+                    vec7 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Surprised"))
+                    vec8 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Calm"))
 
             emo_text = gr.Textbox(label=i18n("Emotion Description"), visible=False, placeholder=i18n("Enter emotion description (e.g., sad, happy, angry...)"))
 
