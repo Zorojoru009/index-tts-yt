@@ -647,6 +647,14 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             # 情感控制选项部分
             with gr.Row():
                 emo_control_method = gr.Radio(choices=EMO_CHOICES_ALL, value=EMO_CHOICES_ALL[0], label=i18n("情感控制模式"), interactive=True)
+                # we MUST have an extra, INVISIBLE list of *all* emotion control
+                # methods so that gr.Dataset() can fetch ALL control mode labels!
+                # otherwise, the gr.Dataset()'s experimental labels would be empty!
+                emo_control_method_all = gr.Radio(
+                    choices=EMO_CHOICES_ALL,
+                    type="index",
+                    value=EMO_CHOICES_ALL[0], label=i18n("情感控制方式"),
+                    visible=False)  # do not render
                 emo_upload = gr.Audio(label=i18n("情感参考音频"), sources=["upload", "microphone"], type="filepath", visible=False)
                 emo_weight = gr.Slider(minimum=0, maximum=1, value=1, label=i18n("情感强度"), visible=False)
             
