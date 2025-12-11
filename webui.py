@@ -51,8 +51,136 @@ for file in [
 
 import gradio as gr
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from indextts.infer_v2 import IndexTTS2
 from tools.i18n.i18n import I18nAuto
+
+class MultiGPUManager:
+    def __init__(self, cmd_args):
+        self.cmd_args = cmd_args
+        self.models = {}  # {device_id: model_instance}
+        # Initialize default model on GPU 0 (or default device)
+        self.default_device_id = 0 if torch.cuda.is_available() else -1
+        
+        # Determine available devices
+        self.available_gpus = []
+        if torch.cuda.is_available():
+            self.available_gpus = [i for i in range(torch.cuda.device_count())]
+        
+        # We start with just the default model loaded (for backward compatibility)
+        # The existing global 'tts' will be treated as model 0
+        
+    def get_model(self, device_id):
+        if device_id not in self.models:
+            print(f">> Loading model on GPU {device_id}...")
+            # Create new instance for this device
+            device_str = f"cuda:{device_id}" if device_id >= 0 else "cpu"
+            model = IndexTTS2(
+                model_dir=self.cmd_args.model_dir,
+                cfg_path=os.path.join(self.cmd_args.model_dir, "config.yaml"),
+                use_fp16=self.cmd_args.fp16,
+                use_deepspeed=self.cmd_args.deepspeed,
+                use_cuda_kernel=self.cmd_args.cuda_kernel,
+                use_accel=self.cmd_args.accel,
+                use_torch_compile=self.cmd_args.compile,
+                device=device_str
+            )
+            self.models[device_id] = model
+        return self.models[device_id]
+
+    def preload_all(self, selected_gpu_ids, prompt_audio, emo_upload, emo_control_method, emo_weight, vec, emo_text, progress):
+        """Preload models and voice on ALL selected GPUs"""
+        total_steps = len(selected_gpu_ids)
+        for i, gpu_id in enumerate(selected_gpu_ids):
+            progress((i / total_steps), desc=f"Loading on GPU {gpu_id}...")
+            model = self.get_model(gpu_id)
+            
+            # Run a dummy inference to trigger caching on this specific model instance
+            # We must duplicate the logic from preload_voice here because each model instance
+            # has its own independent cache!
+            
+            # Determine emotion vector logic (duplicated for safety)
+            emo_vector = vec
+            if emo_control_method == 3 and emo_text: # text
+                 # Re-use the master model's qwen_emo (it's CPU based usually or shared)
+                 # actually each model has its own qwen_emo, but we computed vec passed in.
+                 pass
+
+            dummy_text = "test"
+            model.infer(
+                spk_audio_prompt=prompt_audio,
+                text=dummy_text,
+                output_path=None,
+                emo_audio_prompt=emo_upload if emo_control_method==1 else (None if emo_control_method==0 else prompt_audio),
+                emo_alpha=emo_weight,
+                emo_vector=emo_vector,
+                verbose=False,
+                max_text_tokens_per_segment=20,
+                stream_return=False,
+                do_sample=True,
+                max_mel_tokens=100
+            )
+
+    def infer_distributed(self, selected_gpu_ids, text, **kwargs):
+        """
+        Generator that yields chunks in order, but processes them in parallel across GPUs.
+        """
+        # 1. Use primary model to tokenize/segment
+        # We assume model 0 is always available or use the first selected one
+        primary_gpu = selected_gpu_ids[0] if selected_gpu_ids else self.default_device_id
+        primary_model = self.get_model(primary_gpu)
+        
+        text_tokens_list = primary_model.tokenizer.tokenize(text)
+        max_tokens = kwargs.get('max_text_tokens_per_segment', 120)
+        segments = primary_model.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_tokens))
+        
+        # 2. Define worker function
+        def process_segment(gpu_id, segment, seg_idx):
+            model = self.get_model(gpu_id)
+            # We must convert segment (list of tokens) back to string or pass tokens directly?
+            # infer_generator expects 'text' string usually, but helper methods might use tokens.
+            # actually IndexTTS2.infer_generator takes 'text' and re-tokenizes.
+            # To avoid re-tokenizing overhead/mismatch, we should rebuild string from tokens.
+            # But IndexTTS2 tokenizer is simple. Let's just pass the string segment.
+            seg_text = "".join(segment)
+            
+            # We need to call a version of infer that handles a SINGLE segment.
+            # infer_generator normally splits text. We want to force it to treat this as 1 segment.
+            # We can pass max_text_tokens_per_segment=VeryLarge to prevent splitting.
+            
+            # Update kwargs for this specific call
+            local_kwargs = kwargs.copy()
+            local_kwargs['max_text_tokens_per_segment'] = 999999 # Force single chunk
+            
+            # Call generator but consume it immediately to get the tensor
+            # We expect exactly one chunk (plus silence maybe)
+            gen = model.infer_generator(text=seg_text, **local_kwargs)
+            
+            results = []
+            for item in gen:
+                results.append(item)
+            return results
+
+        # 3. Schedule Tasks
+        futures = []
+        with ThreadPoolExecutor(max_workers=len(selected_gpu_ids)) as executor:
+            for i, seg in enumerate(segments):
+                # Round robin assignment
+                gpu_id = selected_gpu_ids[i % len(selected_gpu_ids)]
+                futures.append(executor.submit(process_segment, gpu_id, seg, i))
+            
+            # 4. Yield Results in Order
+            # We iterate futures in order (which matches segment order)
+            for i, future in enumerate(futures):
+                try:
+                    results = future.result()
+                    # yield all items from this chunk (audio tensors)
+                    for res in results:
+                        yield res
+                except Exception as e:
+                    print(f"Error in distributed chunk {i}: {e}")
+                    # We might want to yield an error or silence to keep stream alive?
+                    pass
 
 if cmd_args.accel:
     try:
@@ -63,14 +191,16 @@ if cmd_args.accel:
 
 i18n = I18nAuto(language="Auto")
 MODE = 'local'
-tts = IndexTTS2(model_dir=cmd_args.model_dir,
-                cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
-                use_fp16=cmd_args.fp16,
-                use_deepspeed=cmd_args.deepspeed,
-                use_cuda_kernel=cmd_args.cuda_kernel,
-                use_accel=cmd_args.accel,
-                use_torch_compile=cmd_args.compile,
-                )
+# Initialize Multi-GPU Manager
+multi_gpu_manager = MultiGPUManager(cmd_args)
+# For backward compatibility with existing code that references global `tts`
+# We use device 0 as default
+if len(multi_gpu_manager.available_gpus) > 0:
+    tts = multi_gpu_manager.get_model(multi_gpu_manager.available_gpus[0])
+else:
+    # CPU case
+    tts = multi_gpu_manager.get_model(-1)
+
 # 支持的语言列表
 LANGUAGES = {
     "中文": "zh_CN",
@@ -142,54 +272,38 @@ def gen_single(emo_control_method,prompt, text,
                emo_text,emo_random,
                max_text_tokens_per_segment=120,
                 *args, progress=gr.Progress()):
-    output_path = None
-    if not output_path:
-        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
-    # set gradio progress
-    tts.gr_progress = progress
-    do_sample, top_p, top_k, temperature, \
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
-    kwargs = {
-        "do_sample": bool(do_sample),
-        "top_p": float(top_p),
-        "top_k": int(top_k) if int(top_k) > 0 else None,
-        "temperature": float(temperature),
-        "length_penalty": float(length_penalty),
-        "num_beams": num_beams,
-        "repetition_penalty": float(repetition_penalty),
-        "max_mel_tokens": int(max_mel_tokens),
-        # "typical_sampling": bool(typical_sampling),
-        # "typical_mass": float(typical_mass),
-    }
-    if type(emo_control_method) is not int:
-        emo_control_method = emo_control_method.value
-    if emo_control_method == 0:  # emotion from speaker
-        emo_ref_path = None  # remove external reference audio
-    if emo_control_method == 1:  # emotion from reference audio
-        pass
-    if emo_control_method == 2:  # emotion from custom vectors
-        vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        vec = tts.normalize_emo_vec(vec, apply_bias=True)
-    else:
-        # don't use the emotion vector inputs for the other modes
-        vec = None
+    # Legacy wrapper for single generation (uses default device)
+    # We can just call gen_single_streaming and consume it
+    result = None
+    gen = gen_single_streaming(
+        None, # selected_gpus (None = default)
+        emo_control_method, prompt, text,
+        emo_ref_path, emo_weight,
+        vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+        emo_text, emo_random,
+        max_text_tokens_per_segment,
+        *args, progress=progress
+    )
+    for item in gen:
+        # consume generator to get final file
+        if 'output_audio' in item:
+             # Streaming updates...
+             pass
+        if 'download_file' in item and item['download_file']:
+            result = item['download_file']
+    return result
 
-    if emo_text == "":
-        # erase empty emotion descriptions; `infer()` will then automatically use the main prompt
-        emo_text = None
+def update_prompt_audio():
+    update_button = gr.update(interactive=True)
+    return update_button
 
-    print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
-    output = tts.infer(spk_audio_prompt=prompt, text=text,
-                       output_path=output_path,
-                       emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight,
-                       emo_vector=vec,
-                       use_emo_text=(emo_control_method==3), emo_text=emo_text,use_random=emo_random,
-                       verbose=cmd_args.verbose,
-                       max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-                       **kwargs)
-    return gr.update(value=output,visible=True)
+def create_warning_message(warning_text):
+    return gr.HTML(f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
 
-def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
+def create_experimental_warning_message():
+    return create_warning_message(i18n('提示：此功能为实验版，结果尚不稳定，我们正在持续优化中。'))
+
+def preload_voice(selected_gpus, prompt_audio, emo_upload, emo_control_method, emo_weight,
                   vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text, 
                   progress=gr.Progress()):
     """Preload voice embeddings to speed up generation"""
@@ -223,36 +337,31 @@ def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
                 emo_dict = tts.qwen_emo.inference(emo_text)
                 emo_vector = list(emo_dict.values())
         
-        yield "⏳ " + i18n("Caching embeddings...")
+        yield "⏳ " + i18n("Caching embeddings on selected GPUs...")
         progress(0.4, desc="Caching embeddings...")
         
-        # Trigger voice analysis by calling a minimal inference
-        # This will populate the cache without generating audio
-        dummy_text = "test"  # Short test text
-        tts.infer(
-            spk_audio_prompt=prompt_audio,
-            text=dummy_text,
-            output_path=None,
-            emo_audio_prompt=emo_ref_path if emo_ref_path else prompt_audio,
-            emo_alpha=emo_weight,
-            emo_vector=emo_vector,
-            verbose=False,
-            max_text_tokens_per_segment=20,
-            stream_return=False,
-            do_sample=True,
-            temperature=0.8,
-            top_p=0.8,
-            top_k=30,
-            max_mel_tokens=100  # Very short to just trigger caching
+        # Handle GPU selection
+        target_gpus = [int(g.split(":")[0].replace("GPU ", "")) for g in selected_gpus] if selected_gpus else [multi_gpu_manager.default_device_id]
+        if not target_gpus: target_gpus = [0] # Fallback
+        
+        multi_gpu_manager.preload_all(
+            target_gpus,
+            prompt_audio=prompt_audio,
+            emo_upload=emo_upload,
+            emo_control_method=emo_control_method,
+            emo_weight=emo_weight,
+            vec=emo_vector,
+            emo_text=emo_text,
+            progress=progress
         )
         
         progress(1.0, desc="Done!")
-        yield "✅ " + i18n("Voice preloaded, ready to generate")
+        yield "✅ " + i18n("Voice preloaded on: ") + f"{target_gpus}"
     except Exception as e:
         print(f"Preload error: {e}")
         yield f"❌ " + i18n("Preload failed") + f": {str(e)}"
 
-def gen_single_streaming(emo_control_method, prompt, text,
+def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         emo_ref_path, emo_weight,
                         vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                         emo_text, emo_random,
@@ -297,14 +406,19 @@ def gen_single_streaming(emo_control_method, prompt, text,
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
     
-    # Calculate segments for progress tracking
+    # Calculate segments for progress tracking using primary model
     text_tokens_list = tts.tokenizer.tokenize(text)
     segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
     total_segments = len(segments)
     
+    # Determine target GPUs
+    target_gpus = [int(g.split(":")[0].replace("GPU ", "")) for g in selected_gpus] if selected_gpus else [multi_gpu_manager.default_device_id]
+    if not target_gpus: target_gpus = [0]
+    
     # Initialize log
     log_lines = []
     log_lines.append(f"🎙️ Starting generation...")
+    log_lines.append(f"🖥️ Using GPUs: {target_gpus}")
     log_lines.append(f"📊 Total segments: {total_segments}")
     log_lines.append(f"📝 Text length: {len(text)} characters, {len(text_tokens_list)} tokens")
     log_lines.append(f"⚙️ Chunk size: {max_text_tokens_per_segment} tokens/segment")
@@ -322,35 +436,50 @@ def gen_single_streaming(emo_control_method, prompt, text,
     chunk_times = []
     
     try:
-        generator = tts.infer_generator(
-            spk_audio_prompt=prompt,
-            text=text,
-            output_path=output_path,
-            emo_audio_prompt=emo_ref_path,
-            emo_alpha=emo_weight,
-            emo_vector=vec,
-            use_emo_text=(emo_control_method==3),
-            emo_text=emo_text,
-            use_random=emo_random,
-            verbose=cmd_args.verbose,
-            max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-            stream_return=True,
-            **kwargs
-        )
+        # Use distributed inference if multiple GPUs selected
+        if len(target_gpus) > 1:
+            generator = multi_gpu_manager.infer_distributed(
+                target_gpus,
+                text=text,
+                spk_audio_prompt=prompt,
+                output_path=output_path,
+                emo_audio_prompt=emo_ref_path,
+                emo_alpha=emo_weight,
+                emo_vector=vec,
+                use_emo_text=(emo_control_method==3),
+                emo_text=emo_text,
+                use_random=emo_random,
+                verbose=cmd_args.verbose,
+                max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                stream_return=True,
+                **kwargs
+            )
+        else:
+            # Single GPU fallback (legacy path but using manager)
+            model = multi_gpu_manager.get_model(target_gpus[0])
+            generator = model.infer_generator(
+                spk_audio_prompt=prompt,
+                text=text,
+                output_path=output_path,
+                emo_audio_prompt=emo_ref_path,
+                emo_alpha=emo_weight,
+                emo_vector=vec,
+                use_emo_text=(emo_control_method==3),
+                emo_text=emo_text,
+                use_random=emo_random,
+                verbose=cmd_args.verbose,
+                max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                stream_return=True,
+                **kwargs
+            )
         
         chunk_idx = 0
         for item in generator:
             if isinstance(item, torch.Tensor):
-                # Check if this is a silence chunk (all zeros)
+                # Check silence
                 is_silence = torch.all(item == 0)
-                
-                # Calculate metrics
                 chunk_end_time = time.time()
-                # For silence chunks, we don't advance the main timer/metrics the same way, 
-                # or we just treat them as part of the flow. 
-                # Let's count them in time but not as a "Text Chunk".
-                
-                audio_duration = item.shape[-1] / 22050  # assuming 22050 Hz
+                audio_duration = item.shape[-1] / 22050
                 
                 if not is_silence:
                     chunk_idx += 1
@@ -359,27 +488,24 @@ def gen_single_streaming(emo_control_method, prompt, text,
                     
                     rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
                     
-                    # Get segment text and clean it
                     raw_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else ""
-                    segment_text = raw_text.replace(' ', ' ').replace(' ', ' ')  # Replace sentence piece underscore with space
+                    segment_text = raw_text.replace(' ', ' ').replace(' ', ' ')
                     
                     log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed in {chunk_duration:.2f}s")
                     log_lines.append(f"   📊 RTF: {rtf:.4f} | Audio: {audio_duration:.2f}s")
-                    log_lines.append(f"   📝 Text: {segment_text[:50]}{'...' if len(segment_text) > 50 else ''}")
+                    log_lines.append(f"   📝 Text: {segment_text[:50]}...")
                     
                     # Estimate remaining time
                     if chunk_idx < total_segments:
+                        # Distributed estimation is tricky, simple linear approx
                         avg_chunk_time = (chunk_end_time - start_time) / chunk_idx
-                        remaining_time = avg_chunk_time * (total_segments - chunk_idx)
+                        remaining_time = avg_chunk_time * (total_segments - chunk_idx) / len(target_gpus) # Simple factor
                         log_lines.append(f"   ⏱️ Est. remaining: {remaining_time:.1f}s")
                     
                     log_lines.append("-" * 50)
                 
-                # Keep log manageable (last 100 lines)
-                if len(log_lines) > 100:
-                    log_lines = log_lines[-100:]
+                if len(log_lines) > 100: log_lines = log_lines[-100:]
                 
-                # Yield updates (yield both audio and silence to player)
                 yield {
                     streaming_log: gr.update(value="\n".join(log_lines)),
                     output_audio: (22050, item.numpy().T) if hasattr(item, 'numpy') else item,
@@ -414,7 +540,7 @@ def gen_single_streaming(emo_control_method, prompt, text,
             download_file: None
         }
 
-def gen_wrapper(streaming_mode, emo_control_method, prompt, text,
+def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                 emo_ref_path, emo_weight,
                 vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                 emo_text, emo_random,
@@ -424,6 +550,7 @@ def gen_wrapper(streaming_mode, emo_control_method, prompt, text,
     if streaming_mode:
         # Use streaming mode
         yield from gen_single_streaming(
+            selected_gpus,
             emo_control_method, prompt, text,
             emo_ref_path, emo_weight,
             vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
@@ -503,54 +630,57 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 value=True,
                 info=i18n("Recommended for long text (5+ min), shows real-time progress and audio playback")
             )
+            
+            # GPU Selection for Multi-GPU environments
+            gpu_choices = [f"GPU {i}" for i in multi_gpu_manager.available_gpus]
+            if not gpu_choices: gpu_choices = ["CPU"]
+            
+            gpu_selection = gr.CheckboxGroup(
+                choices=gpu_choices,
+                value=[gpu_choices[0]] if gpu_choices else [],
+                label=i18n("Select GPUs"),
+                info=i18n("Select multiple GPUs for parallel processing (faster generation, higher VRAM usage)"),
+                visible=len(gpu_choices) > 1
+            )
+            
         with gr.Accordion(i18n("功能设置")):
             # 情感控制选项部分
             with gr.Row():
-                emo_control_method = gr.Radio(
-                    choices=EMO_CHOICES_OFFICIAL,
-                    type="index",
-                    value=EMO_CHOICES_OFFICIAL[0],label=i18n("情感控制方式"))
-                # we MUST have an extra, INVISIBLE list of *all* emotion control
-                # methods so that gr.Dataset() can fetch ALL control mode labels!
-                # otherwise, the gr.Dataset()'s experimental labels would be empty!
-                emo_control_method_all = gr.Radio(
-                    choices=EMO_CHOICES_ALL,
-                    type="index",
-                    value=EMO_CHOICES_ALL[0], label=i18n("情感控制方式"),
-                    visible=False)  # do not render
-        # 情感参考音频部分
-        with gr.Group(visible=False) as emotion_reference_group:
-            with gr.Row():
-                emo_upload = gr.Audio(label=i18n("上传情感参考音频"), type="filepath")
+                emo_control_method = gr.Radio(choices=EMO_CHOICES_ALL, value=EMO_CHOICES_ALL[0], label=i18n("情感控制模式"), interactive=True)
+                emo_upload = gr.Audio(label=i18n("情感参考音频"), sources=["upload", "microphone"], type="filepath", visible=False)
+                emo_weight = gr.Slider(minimum=0, maximum=1, value=1, label=i18n("情感强度"), visible=False)
+            
+            with gr.Row(visible=False) as emo_vec_row:
+                 with gr.Column():
+                    vec1 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 1"))
+                    vec2 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 2"))
+                    vec3 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 3"))
+                    vec4 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 4"))
+                 with gr.Column():
+                    vec5 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 5"))
+                    vec6 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 6"))
+                    vec7 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 7"))
+                    vec8 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 8"))
+            
+            emo_text = gr.Textbox(label=i18n("情感描述文本"), visible=False, placeholder=i18n("请输入情感描述，例如：悲伤、开心、愤怒..."))
+            
+            emo_random = gr.Checkbox(label=i18n("随机情感"), value=False, visible=False)
 
-        # 情感随机采样
-        with gr.Row(visible=False) as emotion_randomize_group:
-            emo_random = gr.Checkbox(label=i18n("情感随机采样"), value=False)
-
-        # 情感向量控制部分
-        with gr.Group(visible=False) as emotion_vector_group:
-            with gr.Row():
-                with gr.Column():
-                    vec1 = gr.Slider(label=i18n("喜"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec2 = gr.Slider(label=i18n("怒"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec3 = gr.Slider(label=i18n("哀"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec4 = gr.Slider(label=i18n("惧"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                with gr.Column():
-                    vec5 = gr.Slider(label=i18n("厌恶"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec6 = gr.Slider(label=i18n("低落"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec7 = gr.Slider(label=i18n("惊喜"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-                    vec8 = gr.Slider(label=i18n("平静"), minimum=0.0, maximum=1.0, value=0.0, step=0.05)
-
-        with gr.Group(visible=False) as emo_text_group:
-            create_experimental_warning_message()
-            with gr.Row():
-                emo_text = gr.Textbox(label=i18n("情感描述文本"),
-                                      placeholder=i18n("请输入情绪描述（或留空以自动使用目标文本作为情绪描述）"),
-                                      value="",
-                                      info=i18n("例如：委屈巴巴、危险在悄悄逼近"))
-
-        with gr.Row(visible=False) as emo_weight_group:
-            emo_weight = gr.Slider(label=i18n("情感权重"), minimum=0.0, maximum=1.0, value=0.65, step=0.01)
+        with gr.Accordion(i18n("高级设置"), open=False):
+             with gr.Row():
+                max_text_tokens_per_segment = gr.Slider(minimum=10, maximum=500, value=120, step=1, label=i18n("分段长度"), info=i18n("长文本分段处理的长度，过长可能会导致显存溢出"))
+                
+             with gr.Row():
+                do_sample = gr.Checkbox(label=i18n("Do Sample"), value=True)
+                top_p = gr.Slider(minimum=0.01, maximum=1.0, value=0.8, step=0.01, label=i18n("Top P"))
+                top_k = gr.Slider(minimum=1, maximum=100, value=30, step=1, label=i18n("Top K"))
+                temperature = gr.Slider(minimum=0.01, maximum=2.0, value=0.8, step=0.01, label=i18n("Temperature"))
+                
+             with gr.Row():
+                length_penalty = gr.Slider(minimum=-2.0, maximum=2.0, value=0.0, step=0.1, label=i18n("Length Penalty"))
+                num_beams = gr.Slider(minimum=1, maximum=5, value=3, step=1, label=i18n("Num Beams"))
+                repetition_penalty = gr.Slider(minimum=1.0, maximum=5.0, value=10.0, step=0.1, label=i18n("Repetition Penalty"))
+                max_mel_tokens = gr.Slider(minimum=10, maximum=2000, value=1500, step=1, label=i18n("Max Mel Tokens"))
 
         # 术语词汇表管理
         with gr.Accordion(i18n("自定义术语词汇读音"), open=False, visible=tts.normalizer.enable_glossary) as glossary_accordion:

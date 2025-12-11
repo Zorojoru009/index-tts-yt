@@ -2,15 +2,16 @@
 
 ## 🎉 New Features
 
-This enhanced version of Index-TTS-YT adds powerful streaming capabilities for long-form audio generation (20-50+ minutes) with real-time feedback and improved performance.
+This enhanced version of Index-TTS-YT adds powerful streaming capabilities for
+- **Long-form Audio Generation**: Break free from the 2-minute limit. Generate 20-50+ minute audio files.
+- **Streaming Playback**: Audio starts playing within seconds, no matter how long the text is.
+- **Real-time Feedback**: Live log shows generation progress, current text segment, and processing speed.
+- **Voice Preloading**: Cache voice embeddings to speed up subsequent generations.
+- **Multi-GPU Support**: Distribute generation across multiple GPUs (e.g., 2x T4) for up to 2x speed.
+- **Improved UI**: Cleaner, localized (English), and more intuitive interface.
+- Significantly speeds up generation when using the same voice multiple times
 
 ## ✨ What's New
-
-### 1. **Voice Preloading** 🔄
-- **Preload Voice** button separates expensive voice analysis from generation
-- Caches speaker and emotion embeddings for faster subsequent generations
-- Status indicator shows when voice is ready
-- Significantly speeds up generation when using the same voice multiple times
 
 ### 2. **Streaming Audio Generation** 🎵
 - Real-time audio playback starts within seconds
