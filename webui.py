@@ -861,44 +861,44 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         # 更新Markdown表格
         return gr.update(value=format_glossary_markdown())
         
+    def update_emo_ui(method_val):
+        """
+        Update UI visibility based on the selected emotion control method.
+        metrics:
+        0: Speaker (default) -> hide all
+        1: Ref Audio -> show upload, weight
+        2: Vector -> show vec_row, weight
+        3: Text -> show text, weight
+        """
+        # method_val might be index or value depending on gradio version/setup, 
+        # but here we used choices list, so it receives the value string.
+        # We need to map it back to index or check string.
+        
+        idx = 0
+        if method_val in EMO_CHOICES_ALL:
+            idx = EMO_CHOICES_ALL.index(method_val)
+        
+        # Returns: [emo_upload, emo_weight, emo_vec_row, emo_text, emo_random]
+        if idx == 0: # Speaker
+            return [gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)]
+        elif idx == 1: # Ref Audio
+            return [gr.update(visible=True), gr.update(visible=True), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)]
+        elif idx == 2: # Vector
+            return [gr.update(visible=False), gr.update(visible=True), gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)]
+        elif idx == 3: # Text
+            return [gr.update(visible=False), gr.update(visible=True), gr.update(visible=False), gr.update(visible=True), gr.update(visible=True)]
+        
+        return [gr.update(visible=False)] * 5
 
-    def on_method_change(emo_control_method):
-        if emo_control_method == 1:  # emotion reference audio
-            return (gr.update(visible=True),
-                    gr.update(visible=False),
-                    gr.update(visible=False),
-                    gr.update(visible=False),
-                    gr.update(visible=True)
-                    )
-        elif emo_control_method == 2:  # emotion vectors
-            return (gr.update(visible=False),
-                    gr.update(visible=True),
-                    gr.update(visible=True),
-                    gr.update(visible=False),
-                    gr.update(visible=True)
-                    )
-        elif emo_control_method == 3:  # emotion text description
-            return (gr.update(visible=False),
-                    gr.update(visible=True),
-                    gr.update(visible=False),
-                    gr.update(visible=True),
-                    gr.update(visible=True)
-                    )
-        else:  # 0: same as speaker voice
-            return (gr.update(visible=False),
-                    gr.update(visible=False),
-                    gr.update(visible=False),
-                    gr.update(visible=False),
-                    gr.update(visible=False)
-                    )
+    # Old handler removed
 
-    emo_control_method.change(on_method_change,
+    emo_control_method.change(update_emo_ui,
         inputs=[emo_control_method],
-        outputs=[emotion_reference_group,
-                 emotion_randomize_group,
-                 emotion_vector_group,
-                 emo_text_group,
-                 emo_weight_group]
+        outputs=[emo_upload,
+                 emo_weight,
+                 emo_vec_row,
+                 emo_text,
+                 emo_random]
     )
 
     def on_experimental_change(is_experimental, current_mode_index):
