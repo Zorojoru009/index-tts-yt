@@ -90,8 +90,10 @@ class MultiGPUManager:
 
     def preload_all(self, selected_gpu_ids, prompt_audio, emo_upload, emo_control_method, emo_weight, vec, emo_text, progress):
         """Preload models and voice on ALL selected GPUs"""
+        print(f">> preload_all called with GPU IDs: {selected_gpu_ids}")
         total_steps = len(selected_gpu_ids)
         for i, gpu_id in enumerate(selected_gpu_ids):
+            print(f">> Preloading on GPU {gpu_id} ({i+1}/{total_steps})")
             progress((i / total_steps), desc=f"Loading on GPU {gpu_id}...")
             model = self.get_model(gpu_id)
             
@@ -203,6 +205,19 @@ i18n = I18nAuto(language="Auto")
 MODE = 'local'
 # Initialize Multi-GPU Manager
 multi_gpu_manager = MultiGPUManager(cmd_args)
+
+# Debug: Print GPU detection info
+print(f">> CUDA Available: {torch.cuda.is_available()}")
+print(f">> GPU Count: {torch.cuda.device_count()}")
+print(f">> Available GPUs: {multi_gpu_manager.available_gpus}")
+for i, gpu_id in enumerate(multi_gpu_manager.available_gpus):
+    try:
+        gpu_name = torch.cuda.get_device_name(gpu_id)
+        gpu_memory = torch.cuda.get_device_properties(gpu_id).total_memory / 1e9
+        print(f"   GPU {gpu_id}: {gpu_name} ({gpu_memory:.2f} GB)")
+    except Exception as e:
+        print(f"   GPU {gpu_id}: Error getting info - {e}")
+
 # For backward compatibility with existing code that references global `tts`
 # We use device 0 as default
 if len(multi_gpu_manager.available_gpus) > 0:
@@ -336,8 +351,15 @@ def preload_voice(selected_gpus, prompt_audio, emo_upload, emo_control_method, e
         progress(0.1, desc="Analyzing voice...")
         
         # Determine emotion control method
-        if type(emo_control_method) is not int:
-            emo_control_method = emo_control_method.value
+        # emo_control_method comes from Gradio Radio as a string value, convert to index
+        if isinstance(emo_control_method, str):
+            try:
+                emo_control_method = EMO_CHOICES_ALL.index(emo_control_method)
+            except ValueError:
+                emo_control_method = 0  # Default to speaker emotion
+        elif not isinstance(emo_control_method, int):
+            # Handle other types (shouldn't happen, but be safe)
+            emo_control_method = 0
         
         # Set up emotion reference
         emo_ref_path = None
@@ -361,9 +383,13 @@ def preload_voice(selected_gpus, prompt_audio, emo_upload, emo_control_method, e
         progress(0.4, desc="Caching embeddings...")
         
         # Handle GPU selection
+        print(f">> DEBUG: selected_gpus input = {selected_gpus}")
+        print(f">> DEBUG: selected_gpus type = {type(selected_gpus)}")
+
         target_gpus = []
         if selected_gpus:
             for g in selected_gpus:
+                print(f">> DEBUG: Processing GPU selection: {g}")
                 if "CPU" in g:
                     target_gpus.append(-1)  # CPU device ID
                 else:
@@ -376,6 +402,7 @@ def preload_voice(selected_gpus, prompt_audio, emo_upload, emo_control_method, e
             target_gpus = [multi_gpu_manager.default_device_id]
 
         if not target_gpus: target_gpus = [0] # Fallback
+        print(f">> DEBUG: Final target_gpus = {target_gpus}")
         
         multi_gpu_manager.preload_all(
             target_gpus,
@@ -419,9 +446,15 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         "repetition_penalty": float(repetition_penalty),
         "max_mel_tokens": int(max_mel_tokens),
     }
-    
-    if type(emo_control_method) is not int:
-        emo_control_method = emo_control_method.value
+
+    # Convert emo_control_method from string (Gradio Radio value) to index
+    if isinstance(emo_control_method, str):
+        try:
+            emo_control_method = EMO_CHOICES_ALL.index(emo_control_method)
+        except ValueError:
+            emo_control_method = 0  # Default to speaker emotion
+    elif not isinstance(emo_control_method, int):
+        emo_control_method = 0
 
     if emo_text == "":
         # erase empty emotion descriptions; `infer()` will then automatically use the main prompt
@@ -680,7 +713,11 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             # GPU Selection for Multi-GPU environments
             gpu_choices = [f"GPU {i}" for i in multi_gpu_manager.available_gpus]
             if not gpu_choices: gpu_choices = ["CPU"]
-            
+
+            # Debug GPU selection
+            print(f">> GPU Choices: {gpu_choices}")
+            print(f">> GPU Selection Visible: {len(gpu_choices) > 1}")
+
             gpu_selection = gr.CheckboxGroup(
                 choices=gpu_choices,
                 value=[gpu_choices[0]] if gpu_choices else [],
