@@ -49,8 +49,8 @@ for file in [
         print(f"Required file {file_path} does not exist. Please download it.")
         sys.exit(1)
 
-import gradio as gr
 import torch
+import gradio as gr
 from concurrent.futures import ThreadPoolExecutor
 from indextts.infer_v2 import IndexTTS2
 from tools.i18n.i18n import I18nAuto
@@ -428,9 +428,13 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         max_text_tokens_per_segment=120,
                         *args, progress=gr.Progress()):
     """Streaming generation with real-time progress updates"""
+    # Create outputs directory if it doesn't exist
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+
     output_path = None
     if not output_path:
-        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
+        output_path = os.path.join(output_dir, f"spk_{int(time.time())}.wav")
     
     # set gradio progress
     tts.gr_progress = progress
