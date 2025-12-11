@@ -190,12 +190,15 @@ def gen_single(emo_control_method,prompt, text,
     return gr.update(value=output,visible=True)
 
 def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
-                  vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text):
+                  vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text, 
+                  progress=gr.Progress()):
     """Preload voice embeddings to speed up generation"""
     if not prompt_audio:
-        return "❌ " + i18n("请先上传音色参考音频")
+        return "❌ " + i18n("Please upload a voice reference audio first")
     
     try:
+        progress(0.1, desc="Analyzing voice...")
+        
         # Determine emotion control method
         if type(emo_control_method) is not int:
             emo_control_method = emo_control_method.value
@@ -213,12 +216,15 @@ def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
             emo_vector = tts.normalize_emo_vec(vec, apply_bias=True)
         elif emo_control_method == 3:  # emotion from text
             if emo_text and emo_text.strip():
+                progress(0.2, desc="Analyzing emotion text...")
                 emo_dict = tts.qwen_emo.inference(emo_text)
                 emo_vector = list(emo_dict.values())
         
+        progress(0.4, desc="Caching embeddings...")
+        
         # Trigger voice analysis by calling a minimal inference
         # This will populate the cache without generating audio
-        dummy_text = "测试"  # Short test text
+        dummy_text = "test"  # Short test text
         tts.infer(
             spk_audio_prompt=prompt_audio,
             text=dummy_text,
@@ -236,10 +242,11 @@ def preload_voice(prompt_audio, emo_upload, emo_control_method, emo_weight,
             max_mel_tokens=100  # Very short to just trigger caching
         )
         
-        return "✅ " + i18n("音色已预加载，可以开始生成")
+        progress(1.0, desc="Done!")
+        return "✅ " + i18n("Voice preloaded, ready to generate")
     except Exception as e:
         print(f"Preload error: {e}")
-        return f"❌ " + i18n("预加载失败") + f": {str(e)}"
+        return f"❌ " + i18n("Preload failed") + f": {str(e)}"
 
 def gen_single_streaming(emo_control_method, prompt, text,
                         emo_ref_path, emo_weight,
@@ -451,14 +458,14 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             with gr.Column():
                 input_text_single = gr.TextArea(label=i18n("文本"),key="input_text_single", placeholder=i18n("请输入目标文本"), info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
                 with gr.Row():
-                    preload_voice_btn = gr.Button("🔄 " + i18n("预加载音色"), scale=1, variant="secondary")
+                    preload_voice_btn = gr.Button("🔄 " + i18n("Preload Voice"), scale=1, variant="secondary")
                     gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True, scale=2, variant="primary")
-                voice_status = gr.Markdown("⏳ " + i18n("音色未预加载"))
+                voice_status = gr.Markdown("⏳ " + i18n("Voice not preloaded"))
             output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio", streaming=True)
         
         with gr.Row():
             streaming_log = gr.Textbox(
-                label=i18n("生成日志"),
+                label=i18n("Generation Log"),
                 lines=8,
                 max_lines=15,
                 interactive=False,
@@ -470,9 +477,9 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=False)
             glossary_checkbox = gr.Checkbox(label=i18n("开启术语词汇读音"), value=tts.normalizer.enable_glossary)
             streaming_mode_checkbox = gr.Checkbox(
-                label=i18n("启用流式生成"), 
+                label=i18n("Enable Streaming"), 
                 value=True,
-                info=i18n("推荐用于长文本（5分钟以上），实时显示进度和播放音频")
+                info=i18n("Recommended for long text (5+ min), shows real-time progress and audio playback")
             )
         with gr.Accordion(i18n("功能设置")):
             # 情感控制选项部分
