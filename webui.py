@@ -28,6 +28,8 @@ parser.add_argument("--model_dir", type=str, default="./checkpoints", help="Mode
 parser.add_argument("--fp16", action="store_true", default=False, help="Use FP16 for inference if available")
 parser.add_argument("--deepspeed", action="store_true", default=False, help="Use DeepSpeed to accelerate if available")
 parser.add_argument("--cuda_kernel", action="store_true", default=False, help="Use CUDA kernel for inference if available")
+parser.add_argument("--accel", action="store_true", default=False, help="Use acceleration engine for GPT (requires flash_attn)")
+parser.add_argument("--compile", action="store_true", default=False, help="Use torch.compile for optimization")
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
 cmd_args = parser.parse_args()
 
@@ -51,6 +53,13 @@ import gradio as gr
 from indextts.infer_v2 import IndexTTS2
 from tools.i18n.i18n import I18nAuto
 
+if cmd_args.accel:
+    try:
+        import flash_attn
+    except ImportError:
+        print("Warning: --accel was specified but 'flash_attn' is not installed. Disabling acceleration.")
+        cmd_args.accel = False
+
 i18n = I18nAuto(language="Auto")
 MODE = 'local'
 tts = IndexTTS2(model_dir=cmd_args.model_dir,
@@ -58,6 +67,8 @@ tts = IndexTTS2(model_dir=cmd_args.model_dir,
                 use_fp16=cmd_args.fp16,
                 use_deepspeed=cmd_args.deepspeed,
                 use_cuda_kernel=cmd_args.cuda_kernel,
+                use_accel=cmd_args.accel,
+                use_torch_compile=cmd_args.compile,
                 )
 # 支持的语言列表
 LANGUAGES = {
