@@ -106,12 +106,22 @@ class MultiGPUManager:
                  # actually each model has its own qwen_emo, but we computed vec passed in.
                  pass
 
+            # Determine emotion audio prompt based on mode
+            if emo_control_method == 0:  # speaker emotion
+                emo_audio_prompt = None
+            elif emo_control_method == 1:  # reference audio emotion
+                emo_audio_prompt = emo_upload
+            elif emo_control_method == 2:  # vector emotion (no audio needed)
+                emo_audio_prompt = None
+            else:  # text emotion (mode 3)
+                emo_audio_prompt = None
+
             dummy_text = "test"
             model.infer(
                 spk_audio_prompt=prompt_audio,
                 text=dummy_text,
                 output_path=None,
-                emo_audio_prompt=emo_upload if emo_control_method==1 else (None if emo_control_method==0 else prompt_audio),
+                emo_audio_prompt=emo_audio_prompt,
                 emo_alpha=emo_weight,
                 emo_vector=emo_vector,
                 verbose=False,
@@ -206,10 +216,10 @@ LANGUAGES = {
     "中文": "zh_CN",
     "English": "en_US"
 }
-EMO_CHOICES_ALL = [i18n("与音色参考音频相同"),
-                i18n("使用情感参考音频"),
-                i18n("使用情感向量控制"),
-                i18n("使用情感描述文本控制")]
+EMO_CHOICES_ALL = [i18n("Same emotion as speaker"),
+                i18n("Reference audio emotion"),
+                i18n("Emotion vector control"),
+                i18n("Text-based emotion control")]
 EMO_CHOICES_OFFICIAL = EMO_CHOICES_ALL[:-1]  # skip experimental features
 
 os.makedirs("outputs/tasks",exist_ok=True)
@@ -301,16 +311,26 @@ def create_warning_message(warning_text):
     return gr.HTML(f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
 
 def create_experimental_warning_message():
-    return create_warning_message(i18n('提示：此功能为实验版，结果尚不稳定，我们正在持续优化中。'))
+    return create_warning_message(i18n('Note: This feature is experimental. Results may be unstable. We are continuously optimizing.'))
 
 def preload_voice(selected_gpus, prompt_audio, emo_upload, emo_control_method, emo_weight,
-                  vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text, 
+                  vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text,
                   progress=gr.Progress()):
     """Preload voice embeddings to speed up generation"""
+    # Validate audio input
     if not prompt_audio:
         yield "❌ " + i18n("Please upload a voice reference audio first")
         return
-    
+
+    # If prompt_audio is a dict (from Gradio File component), extract the file path
+    if isinstance(prompt_audio, dict):
+        prompt_audio = prompt_audio.get("name") or prompt_audio.get("path")
+
+    # Validate that file exists
+    if not prompt_audio or not os.path.exists(prompt_audio):
+        yield "❌ " + i18n("Audio file not found or invalid")
+        return
+
     try:
         yield "⏳ " + i18n("Analyzing voice...")
         progress(0.1, desc="Analyzing voice...")
@@ -341,7 +361,20 @@ def preload_voice(selected_gpus, prompt_audio, emo_upload, emo_control_method, e
         progress(0.4, desc="Caching embeddings...")
         
         # Handle GPU selection
-        target_gpus = [int(g.split(":")[0].replace("GPU ", "")) for g in selected_gpus] if selected_gpus else [multi_gpu_manager.default_device_id]
+        target_gpus = []
+        if selected_gpus:
+            for g in selected_gpus:
+                if "CPU" in g:
+                    target_gpus.append(-1)  # CPU device ID
+                else:
+                    try:
+                        gpu_id = int(g.split(":")[0].replace("GPU ", ""))
+                        target_gpus.append(gpu_id)
+                    except (ValueError, IndexError):
+                        target_gpus.append(multi_gpu_manager.default_device_id)
+        else:
+            target_gpus = [multi_gpu_manager.default_device_id]
+
         if not target_gpus: target_gpus = [0] # Fallback
         
         multi_gpu_manager.preload_all(
@@ -389,20 +422,25 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
     
     if type(emo_control_method) is not int:
         emo_control_method = emo_control_method.value
-    if emo_control_method == 0:  # emotion from speaker
-        emo_ref_path = None  # remove external reference audio
-    if emo_control_method == 1:  # emotion from reference audio
-        pass
-    if emo_control_method == 2:  # emotion from custom vectors
-        vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        vec = tts.normalize_emo_vec(vec, apply_bias=True)
-    else:
-        # don't use the emotion vector inputs for the other modes
-        vec = None
 
     if emo_text == "":
         # erase empty emotion descriptions; `infer()` will then automatically use the main prompt
         emo_text = None
+
+    # Handle emotion control vectors
+    vec = None
+    if emo_control_method == 0:  # emotion from speaker
+        emo_ref_path = None  # remove external reference audio
+        vec = None
+    elif emo_control_method == 1:  # emotion from reference audio
+        vec = None
+    elif emo_control_method == 2:  # emotion from custom vectors
+        vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+        vec = tts.normalize_emo_vec(vec, apply_bias=True)
+    elif emo_control_method == 3:  # emotion from text
+        if emo_text and emo_text.strip():
+            emo_dict = tts.qwen_emo.inference(emo_text)
+            vec = list(emo_dict.values())
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
     
@@ -412,7 +450,20 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
     total_segments = len(segments)
     
     # Determine target GPUs
-    target_gpus = [int(g.split(":")[0].replace("GPU ", "")) for g in selected_gpus] if selected_gpus else [multi_gpu_manager.default_device_id]
+    target_gpus = []
+    if selected_gpus:
+        for g in selected_gpus:
+            if "CPU" in g:
+                target_gpus.append(-1)  # CPU device ID
+            else:
+                try:
+                    gpu_id = int(g.split(":")[0].replace("GPU ", ""))
+                    target_gpus.append(gpu_id)
+                except (ValueError, IndexError):
+                    target_gpus.append(multi_gpu_manager.default_device_id)
+    else:
+        target_gpus = [multi_gpu_manager.default_device_id]
+
     if not target_gpus: target_gpus = [0]
     
     # Initialize log
@@ -545,7 +596,8 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                 vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                 emo_text, emo_random,
                 max_text_tokens_per_segment=120,
-                *args, progress=gr.Progress()):
+                *args,
+                progress=gr.Progress()):
     """Wrapper that switches between streaming and non-streaming modes"""
     if streaming_mode:
         # Use streaming mode
@@ -578,12 +630,6 @@ def update_prompt_audio():
     update_button = gr.update(interactive=True)
     return update_button
 
-def create_warning_message(warning_text):
-    return gr.HTML(f"<div style=\"padding: 0.5em 0.8em; border-radius: 0.5em; background: #ffa87d; color: #000; font-weight: bold\">{html.escape(warning_text)}</div>")
-
-def create_experimental_warning_message():
-    return create_warning_message(i18n('提示：此功能为实验版，结果尚不稳定，我们正在持续优化中。'))
-
 with gr.Blocks(title="IndexTTS Demo") as demo:
     mutex = threading.Lock()
     gr.HTML('''
@@ -593,23 +639,23 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 </p>
     ''')
 
-    with gr.Tab(i18n("音频生成")):
+    with gr.Tab(i18n("Audio Generation")):
         with gr.Row():
             os.makedirs("prompts",exist_ok=True)
-            prompt_audio = gr.Audio(label=i18n("音色参考音频"),key="prompt_audio",
+            prompt_audio = gr.Audio(label=i18n("Voice Reference Audio"),key="prompt_audio",
                                     sources=["upload","microphone"],type="filepath")
             prompt_list = os.listdir("prompts")
             default = ''
             if prompt_list:
                 default = prompt_list[0]
             with gr.Column():
-                input_text_single = gr.TextArea(label=i18n("文本"),key="input_text_single", placeholder=i18n("请输入目标文本"), info=f"{i18n('当前模型版本')}{tts.model_version or '1.0'}")
+                input_text_single = gr.TextArea(label=i18n("Text"),key="input_text_single", placeholder=i18n("Enter target text here"), info=f"{i18n('Current model version')}{tts.model_version or '1.0'}")
                 with gr.Row():
                     preload_voice_btn = gr.Button("🔄 " + i18n("Preload Voice"), scale=1, variant="secondary")
-                    gen_button = gr.Button(i18n("生成语音"), key="gen_button",interactive=True, scale=2, variant="primary")
+                    gen_button = gr.Button(i18n("Generate Speech"), key="gen_button",interactive=True, scale=2, variant="primary")
                 voice_status = gr.Markdown("⏳ " + i18n("Voice not preloaded"))
             with gr.Column():
-                output_audio = gr.Audio(label=i18n("生成结果"), visible=True,key="output_audio", streaming=True)
+                output_audio = gr.Audio(label=i18n("Generation Result"), visible=True,key="output_audio", streaming=True)
                 download_file = gr.File(label=i18n("Download Audio"), visible=True)
         
         with gr.Row():
@@ -623,10 +669,10 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             )
 
         with gr.Row():
-            experimental_checkbox = gr.Checkbox(label=i18n("显示实验功能"), value=False)
-            glossary_checkbox = gr.Checkbox(label=i18n("开启术语词汇读音"), value=tts.normalizer.enable_glossary)
+            experimental_checkbox = gr.Checkbox(label=i18n("Show Experimental Features"), value=False)
+            glossary_checkbox = gr.Checkbox(label=i18n("Enable Custom Terminology Pronunciation"), value=tts.normalizer.enable_glossary)
             streaming_mode_checkbox = gr.Checkbox(
-                label=i18n("Enable Streaming"), 
+                label=i18n("Enable Streaming"),
                 value=True,
                 info=i18n("Recommended for long text (5+ min), shows real-time progress and audio playback")
             )
@@ -643,40 +689,40 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 visible=len(gpu_choices) > 1
             )
             
-        with gr.Accordion(i18n("功能设置")):
-            # 情感控制选项部分
+        with gr.Accordion(i18n("Emotion Control")):
+            # Emotion control options section
             with gr.Row():
-                emo_control_method = gr.Radio(choices=EMO_CHOICES_ALL, value=EMO_CHOICES_ALL[0], label=i18n("情感控制模式"), interactive=True)
+                emo_control_method = gr.Radio(choices=EMO_CHOICES_ALL, value=EMO_CHOICES_ALL[0], label=i18n("Emotion Control Mode"), interactive=True)
                 # we MUST have an extra, INVISIBLE list of *all* emotion control
                 # methods so that gr.Dataset() can fetch ALL control mode labels!
                 # otherwise, the gr.Dataset()'s experimental labels would be empty!
                 emo_control_method_all = gr.Radio(
                     choices=EMO_CHOICES_ALL,
                     type="index",
-                    value=EMO_CHOICES_ALL[0], label=i18n("情感控制方式"),
+                    value=EMO_CHOICES_ALL[0], label=i18n("Emotion Control Method"),
                     visible=False)  # do not render
-                emo_upload = gr.Audio(label=i18n("情感参考音频"), sources=["upload", "microphone"], type="filepath", visible=False)
-                emo_weight = gr.Slider(minimum=0, maximum=1, value=1, label=i18n("情感强度"), visible=False)
-            
+                emo_upload = gr.Audio(label=i18n("Emotion Reference Audio"), sources=["upload", "microphone"], type="filepath", visible=False)
+                emo_weight = gr.Slider(minimum=0, maximum=1, value=1, label=i18n("Emotion Strength"), visible=False)
+
             with gr.Row(visible=False) as emo_vec_row:
                  with gr.Column():
-                    vec1 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 1"))
-                    vec2 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 2"))
-                    vec3 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 3"))
-                    vec4 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 4"))
+                    vec1 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 1"))
+                    vec2 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 2"))
+                    vec3 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 3"))
+                    vec4 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 4"))
                  with gr.Column():
-                    vec5 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 5"))
-                    vec6 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 6"))
-                    vec7 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 7"))
-                    vec8 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("情感向量 8"))
-            
-            emo_text = gr.Textbox(label=i18n("情感描述文本"), visible=False, placeholder=i18n("请输入情感描述，例如：悲伤、开心、愤怒..."))
-            
-            emo_random = gr.Checkbox(label=i18n("随机情感"), value=False, visible=False)
+                    vec5 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 5"))
+                    vec6 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 6"))
+                    vec7 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 7"))
+                    vec8 = gr.Slider(minimum=-5, maximum=5, value=0, label=i18n("Emotion Vector 8"))
 
-        with gr.Accordion(i18n("高级设置"), open=False):
+            emo_text = gr.Textbox(label=i18n("Emotion Description"), visible=False, placeholder=i18n("Enter emotion description (e.g., sad, happy, angry...)"))
+
+            emo_random = gr.Checkbox(label=i18n("Random Emotion"), value=False, visible=False)
+
+        with gr.Accordion(i18n("Advanced Settings"), open=False):
              with gr.Row():
-                max_text_tokens_per_segment = gr.Slider(minimum=10, maximum=500, value=120, step=1, label=i18n("分段长度"), info=i18n("长文本分段处理的长度，过长可能会导致显存溢出"))
+                max_text_tokens_per_segment = gr.Slider(minimum=10, maximum=500, value=120, step=1, label=i18n("Segment Length"), info=i18n("Text segmentation length for long text processing. Too long may cause memory overflow"))
                 
              with gr.Row():
                 do_sample = gr.Checkbox(label=i18n("Do Sample"), value=True)
@@ -690,35 +736,35 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 repetition_penalty = gr.Slider(minimum=1.0, maximum=5.0, value=10.0, step=0.1, label=i18n("Repetition Penalty"))
                 max_mel_tokens = gr.Slider(minimum=10, maximum=2000, value=1500, step=1, label=i18n("Max Mel Tokens"))
 
-        # 术语词汇表管理
-        with gr.Accordion(i18n("自定义术语词汇读音"), open=False, visible=tts.normalizer.enable_glossary) as glossary_accordion:
-            gr.Markdown(i18n("自定义个别专业术语的读音"))
+        # Glossary/Terminology management
+        with gr.Accordion(i18n("Custom Terminology Pronunciation"), open=False, visible=tts.normalizer.enable_glossary) as glossary_accordion:
+            gr.Markdown(i18n("Customize pronunciation for specific professional terms"))
             with gr.Row():
                 with gr.Column(scale=1):
                     glossary_term = gr.Textbox(
-                        label=i18n("术语"),
+                        label=i18n("Term"),
                         placeholder="IndexTTS2",
                     )
                     glossary_reading_zh = gr.Textbox(
-                        label=i18n("中文读法"),
+                        label=i18n("Chinese Pronunciation"),
                         placeholder="Index T-T-S 二",
                     )
                     glossary_reading_en = gr.Textbox(
-                        label=i18n("英文读法"),
+                        label=i18n("English Pronunciation"),
                         placeholder="Index T-T-S two",
                     )
-                    btn_add_term = gr.Button(i18n("添加术语"), scale=1)
+                    btn_add_term = gr.Button(i18n("Add Term"), scale=1)
                 with gr.Column(scale=2):
                     glossary_table = gr.Markdown(
                         value=format_glossary_markdown()
                     )
 
-        with gr.Accordion(i18n("高级生成参数设置"), open=False, visible=True) as advanced_settings_group:
+        with gr.Accordion(i18n("Advanced Generation Parameters"), open=False, visible=True) as advanced_settings_group:
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown(f"**{i18n('GPT2 采样设置')}** _{i18n('参数会影响音频多样性和生成速度详见')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
+                    gr.Markdown(f"**{i18n('GPT2 Sampling Settings')}** _{i18n('Parameters affect audio diversity and generation speed. See')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
                     with gr.Row():
-                        do_sample = gr.Checkbox(label="do_sample", value=True, info=i18n("是否进行采样"))
+                        do_sample = gr.Checkbox(label="do_sample", value=True, info=i18n("Whether to perform sampling"))
                         temperature = gr.Slider(label="temperature", minimum=0.1, maximum=2.0, value=0.8, step=0.1)
                     with gr.Row():
                         top_p = gr.Slider(label="top_p", minimum=0.0, maximum=1.0, value=0.8, step=0.01)
@@ -727,21 +773,21 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     with gr.Row():
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)
                         length_penalty = gr.Number(label="length_penalty", precision=None, value=0.0, minimum=-2.0, maximum=2.0, step=0.1)
-                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("生成Token最大数量，过小导致音频被截断"), key="max_mel_tokens")
+                    max_mel_tokens = gr.Slider(label="max_mel_tokens", value=1500, minimum=50, maximum=tts.cfg.gpt.max_mel_tokens, step=10, info=i18n("Maximum tokens to generate. Too small will truncate audio"), key="max_mel_tokens")
                     # with gr.Row():
-                    #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="不建议使用")
+                    #     typical_sampling = gr.Checkbox(label="typical_sampling", value=False, info="Not recommended")
                     #     typical_mass = gr.Slider(label="typical_mass", value=0.9, minimum=0.0, maximum=1.0, step=0.1)
                 with gr.Column(scale=2):
-                    gr.Markdown(f'**{i18n("分句设置")}** _{i18n("参数会影响音频质量和生成速度")}_')
+                    gr.Markdown(f'**{i18n("Sentence Segmentation")}** _{i18n("Parameters affect audio quality and generation speed")}_')
                     with gr.Row():
                         initial_value = max(20, min(tts.cfg.gpt.max_text_tokens, cmd_args.gui_seg_tokens))
                         max_text_tokens_per_segment = gr.Slider(
-                            label=i18n("分句最大Token数"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
-                            info=i18n("建议80~200之间，值越大，分句越长；值越小，分句越碎；过小过大都可能导致音频质量不高"),
+                            label=i18n("Max tokens per segment"), value=initial_value, minimum=20, maximum=tts.cfg.gpt.max_text_tokens, step=2, key="max_text_tokens_per_segment",
+                            info=i18n("Recommended 80~200. Larger = longer segments, smaller = shorter. Too extreme values affect quality"),
                         )
-                    with gr.Accordion(i18n("预览分句结果"), open=True) as segments_settings:
+                    with gr.Accordion(i18n("Segment Preview"), open=True) as segments_settings:
                         segments_preview = gr.Dataframe(
-                            headers=[i18n("序号"), i18n("分句内容"), i18n("Token数")],
+                            headers=[i18n("Index"), i18n("Segment Content"), i18n("Tokens")],
                             key="segments_preview",
                             wrap=True,
                         )
@@ -901,12 +947,18 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                  emo_random]
     )
 
-    def on_experimental_change(is_experimental, current_mode_index):
-        # 切换情感控制选项
+    def on_experimental_change(is_experimental, current_mode_value):
+        # Switch emotion control options based on experimental mode
         new_choices = EMO_CHOICES_ALL if is_experimental else EMO_CHOICES_OFFICIAL
-        # if their current mode selection doesn't exist in new choices, reset to 0.
-        # we don't verify that OLD index means the same in NEW list, since we KNOW it does.
-        new_index = current_mode_index if current_mode_index < len(new_choices) else 0
+
+        # Convert the string value to index
+        try:
+            current_index = EMO_CHOICES_ALL.index(current_mode_value) if current_mode_value in EMO_CHOICES_ALL else 0
+        except (ValueError, AttributeError):
+            current_index = 0
+
+        # If current selection doesn't exist in new choices, reset to first option
+        new_index = current_index if current_index < len(new_choices) else 0
 
         return (
             gr.update(choices=new_choices, value=new_choices[new_index]),
@@ -972,7 +1024,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     # Preload voice button handler
     preload_voice_btn.click(
         preload_voice,
-        inputs=[prompt_audio, emo_upload, emo_control_method, emo_weight,
+        inputs=[gpu_selection, prompt_audio, emo_upload, emo_control_method, emo_weight,
                 vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text],
         outputs=[voice_status]
     )
@@ -980,7 +1032,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     # Generate button with streaming
     gen_button.click(
         gen_wrapper,
-        inputs=[streaming_mode_checkbox, emo_control_method, prompt_audio, input_text_single, emo_upload, emo_weight,
+        inputs=[streaming_mode_checkbox, gpu_selection, emo_control_method, prompt_audio, input_text_single, emo_upload, emo_weight,
                 vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                 emo_text, emo_random,
                 max_text_tokens_per_segment,
