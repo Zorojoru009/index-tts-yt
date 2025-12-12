@@ -613,7 +613,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                 }
         
         # Concatenate all chunks and save to file
-        import soundfile as sf
+        import numpy as np
+        from scipy.io import wavfile
 
         if all_audio_chunks:
             log_lines.append("=" * 50)
@@ -622,23 +623,49 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
             # Concatenate all chunks
             try:
                 concatenated_audio = torch.cat(all_audio_chunks, dim=-1)
-                audio_data = concatenated_audio.numpy() if isinstance(concatenated_audio, torch.Tensor) else concatenated_audio
 
-                # Save to file
-                sf.write(output_path, audio_data, 22050, subtype='PCM_16')
+                # Convert to numpy
+                if isinstance(concatenated_audio, torch.Tensor):
+                    audio_data = concatenated_audio.cpu().numpy()
+                else:
+                    audio_data = concatenated_audio
+
+                # Ensure correct shape: (samples,) for mono or (samples, channels) for multi-channel
+                if len(audio_data.shape) == 2 and audio_data.shape[0] < audio_data.shape[1]:
+                    # If shape is (channels, samples), transpose to (samples, channels)
+                    audio_data = audio_data.T
+
+                # Normalize and convert to int16
+                audio_data = np.asarray(audio_data)
+
+                # If values are in range [-1, 1], convert to int16 range
+                if audio_data.max() <= 1.0 and audio_data.min() >= -1.0:
+                    audio_data = (audio_data * 32767).astype(np.int16)
+                else:
+                    # Already in int16 range
+                    audio_data = audio_data.astype(np.int16)
+
+                # Save to file using scipy
+                wavfile.write(output_path, 22050, audio_data)
 
                 # Verify file
                 if os.path.exists(output_path):
                     file_size = os.path.getsize(output_path)
-                    file_duration = len(audio_data) / 22050
+                    if len(audio_data.shape) == 1:
+                        num_samples = len(audio_data)
+                    else:
+                        num_samples = audio_data.shape[0]
+                    file_duration = num_samples / 22050
                     log_lines.append(f"✅ Concatenation complete!")
-                    log_lines.append(f"📊 Total samples: {len(audio_data):,}")
+                    log_lines.append(f"📊 Total samples: {num_samples:,}")
                     log_lines.append(f"⏱️ Duration: {file_duration:.2f}s")
                     log_lines.append(f"💾 File size: {file_size / 1024:.1f} KB")
                 else:
                     log_lines.append(f"❌ Error: Failed to save concatenated audio!")
             except Exception as concat_error:
                 log_lines.append(f"❌ Concatenation error: {str(concat_error)}")
+                import traceback
+                traceback.print_exc()  # Print full error for debugging
 
         # Final summary
         avg_rtf = sum([(chunk_times[i] - (chunk_times[i-1] if i > 0 else start_time)) for i in range(len(chunk_times))]) / ((chunk_times[-1] - start_time) / len(chunk_times)) if chunk_times else 0
