@@ -142,6 +142,10 @@ class TextNormalizer:
             print("Error, text normalizer is not initialized !!!")
             return ""
         if self.use_chinese(text):
+            # Disambiguate "No." (Number) vs "No." (Negation)
+            # If "No." is NOT followed by a digit, separate the dot so normalizer treats it as word "No" + period
+            text = re.sub(r"(\bNo)\.(?=\s+(?![0-9])|$)", r"\1 .", text)
+            
             # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
             # 应用术语词汇表（优先级最高，在所有保护之前）
             if self.enable_glossary:
@@ -166,6 +170,9 @@ class TextNormalizer:
             result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
+                # Disambiguate "No." (Number) vs "No." (Negation)
+                text = re.sub(r"(\bNo)\.(?=\s+(?![0-9])|$)", r"\1 .", text)
+                
                 # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
                 # 应用术语词汇表（优先级最高，在所有保护之前）
                 if self.enable_glossary:
