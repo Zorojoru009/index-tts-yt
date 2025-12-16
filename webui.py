@@ -296,6 +296,7 @@ def gen_single(emo_control_method,prompt, text,
                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                emo_text,emo_random,
                max_text_tokens_per_segment=120,
+               interval_silence=200,
                 *args, progress=gr.Progress()):
     # Legacy wrapper for single generation (uses default device)
     # We can just call gen_single_streaming and consume it
@@ -307,6 +308,7 @@ def gen_single(emo_control_method,prompt, text,
         vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
         emo_text, emo_random,
         max_text_tokens_per_segment,
+        interval_silence,
         *args, progress=progress
     )
     for item in gen:
@@ -716,6 +718,7 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
             emo_text, emo_random,
             max_text_tokens_per_segment,
+            interval_silence,
             *args, progress=progress
         )
     else:
@@ -726,6 +729,7 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
             emo_text, emo_random,
             max_text_tokens_per_segment,
+            interval_silence,
             *args, progress=progress
         )
         yield {
