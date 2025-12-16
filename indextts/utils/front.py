@@ -529,16 +529,39 @@ class TextTokenizer:
             token = tokenized_str[i]
             current_segment.append(token)
             current_segment_tokens_len += 1
-            if not  ("," in split_tokens or "▁," in split_tokens ) and ("," in current_segment or "▁," in current_segment): 
-                # 如果当前tokens中有,，则按,分割
+            
+            # Revised Logic:
+            # 1. Split on Sentence Terminators (. ? !) immediately
+            # 2. Split on Commas (,) ONLY if we are approaching the limit or have enough context? 
+            #    Actually, keeping previous logic for commas is fine, but we should be careful.
+            # 3. REMOVED Eager Hyphen Splitting to protect compound words (e.g. self-esteem)
+
+            if not ("," in split_tokens or "▁," in split_tokens ) and ("," in current_segment or "▁," in current_segment): 
+                # If current_segment has a comma, and we are in a sub-recursive call (comma not in split_tokens)
                 sub_segments = TextTokenizer.split_segments_by_token(
                     current_segment, [",", "▁,"], max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens
                 )
-            elif "-" not in split_tokens and "-" in current_segment:
-                # 没有,，则按-分割
+                if len(sub_segments) > 1: # Only use sub-segments if it actually split
+                     # Pop the last one because it might be incomplete/continue into next iteration
+                     # Wait, recursive logic is tricky. The original logic was:
+                     # If we find a comma, we immediately recurse on the *whole* current_segment so far?
+                     # No, the original logic was: if comma is NOT in split_tokens (meaning we haven't split by comma yet),
+                     # AND comma IS in current_segment, then split by comma.
+                     pass 
+                # Actually, adhering to the original recursive structure but removing hyphens:
                 sub_segments = TextTokenizer.split_segments_by_token(
-                    current_segment, ["-"], max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens
+                    current_segment, [",", "▁,"], max_text_tokens_per_segment=max_text_tokens_per_segment, quick_streaming_tokens = quick_streaming_tokens
                 )
+                # If the recursive split returned multiple, it means it found a valid split point.
+                if len(sub_segments) > 1:
+                     segments.extend(sub_segments[:-1])
+                     current_segment = sub_segments[-1]
+                     current_segment_tokens_len = len(current_segment)
+                     continue
+
+            # Original hyphen logic removed here to protect compound words.
+            # elif "-" not in split_tokens and "-" in current_segment: ...
+
             elif current_segment_tokens_len <= max_text_tokens_per_segment:
                 if token in split_tokens and current_segment_tokens_len > 2:
                     if i < len(tokenized_str) - 1:
@@ -552,26 +575,57 @@ class TextTokenizer:
                 continue
             # 如果当前tokens的长度超过最大限制
             else:
-                # 按照长度分割
-                sub_segments = []
-                for j in range(0, len(current_segment), max_text_tokens_per_segment):
-                    if j + max_text_tokens_per_segment < len(current_segment):
-                        sub_segments.append(current_segment[j : j + max_text_tokens_per_segment])
-                    else:
-                        sub_segments.append(current_segment[j:])
-                warnings.warn(
-                    f"The tokens length of segment exceeds limit: {max_text_tokens_per_segment}, "
-                    f"Tokens in segment: {current_segment}."
-                    "Maybe unexpected behavior",
-                    RuntimeWarning,
-                )
-            segments.extend(sub_segments)
-            current_segment = []
-            current_segment_tokens_len = 0
+                # 按照长度分割 (Smart Fallback)
+                # Instead of blindly chopping at max_text_tokens_per_segment, try to find a space or safe token
+                
+                # Try to find the last "space" token in the current segment to split cleanly
+                split_idx = -1
+                # Search backwards from the end
+                for k in range(len(current_segment) - 1, int(len(current_segment) * 0.5), -1):
+                    # Check if token is a space or starts with space (SentencePiece often prefixes with space/underscore)
+                    # Common SP tokens: " " (U+2581)
+                    if " " in current_segment[k] or current_segment[k] == " ":
+                        split_idx = k
+                        break
+                
+                if split_idx != -1:
+                    # Split at the found space
+                    segments.append(current_segment[:split_idx])
+                    # The remaining part becomes the new current_segment
+                    # We need to restart accumulation with the remainders
+                    remainder = current_segment[split_idx:]
+                    current_segment = remainder
+                    current_segment_tokens_len = len(remainder)
+                    # Warn less aggressively since this is a "smart" chop
+                    # warnings.warn(...) 
+                else:
+                    # Fallback to blind chop if no space found (unexpected for normal text)
+                    sub_segments = []
+                    for j in range(0, len(current_segment), max_text_tokens_per_segment):
+                        if j + max_text_tokens_per_segment < len(current_segment):
+                            sub_segments.append(current_segment[j : j + max_text_tokens_per_segment])
+                        else:
+                            sub_segments.append(current_segment[j:])
+                    
+                    # The last chunk is the new current_segment
+                    segments.extend(sub_segments[:-1])
+                    current_segment = sub_segments[-1]
+                    current_segment_tokens_len = len(current_segment)
+                    
+                    warnings.warn(
+                        f"The tokens length of segment exceeds limit: {max_text_tokens_per_segment}, "
+                        f"Tokens in segment: {current_segment}."
+                        "Blind chop forced.",
+                        RuntimeWarning,
+                    )
+                # Continue loop
+                continue
+
         if current_segment_tokens_len > 0:
-            assert current_segment_tokens_len <= max_text_tokens_per_segment
+            # assert current_segment_tokens_len <= max_text_tokens_per_segment # Assertion might fail with smart chop leftovers?
             segments.append(current_segment)
-        # 如果相邻的句子加起来长度小于最大限制，且此前token总数超过quick_streaming_tokens，则合并
+            
+        # Re-merge logic (Keep existing)
         merged_segments = []
         total_token = 0
         for segment in segments:

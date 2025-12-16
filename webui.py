@@ -426,6 +426,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                         emo_text, emo_random,
                         max_text_tokens_per_segment=120,
+                        interval_silence=200,
                         *args, progress=gr.Progress()):
     """Streaming generation with real-time progress updates"""
     # Create outputs directory if it doesn't exist
@@ -450,6 +451,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         "repetition_penalty": float(repetition_penalty),
         "max_mel_tokens": int(max_mel_tokens),
     }
+    # Pass interval_silence in kwargs
+    kwargs["interval_silence"] = int(interval_silence)
 
     # Convert emo_control_method from string (Gradio Radio value) to index
     if isinstance(emo_control_method, str):
@@ -699,7 +702,8 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                 emo_ref_path, emo_weight,
                 vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                 emo_text, emo_random,
-                max_text_tokens_per_segment=120,
+                max_text_tokens_per_segment,
+                interval_silence, # Added interval_silence here
                 *args,
                 progress=gr.Progress()):
     """Wrapper that switches between streaming and non-streaming modes"""
@@ -831,6 +835,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         with gr.Accordion(i18n("Advanced Settings"), open=False):
              with gr.Row():
                 max_text_tokens_per_segment = gr.Slider(minimum=10, maximum=500, value=120, step=1, label=i18n("Segment Length"), info=i18n("Text segmentation length for long text processing. Too long may cause memory overflow"))
+                interval_silence = gr.Slider(minimum=0, maximum=2000, value=200, step=50, label=i18n("Interval Silence (ms)"), info=i18n("Silence between segments"))
                 
              with gr.Row():
                 do_sample = gr.Checkbox(label=i18n("Do Sample"), value=True)
@@ -1144,6 +1149,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
                 emo_text, emo_random,
                 max_text_tokens_per_segment,
+                interval_silence,
                 *advanced_params,
         ],
         outputs=[streaming_log, output_audio, download_file]
