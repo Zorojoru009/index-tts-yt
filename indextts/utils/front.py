@@ -486,6 +486,8 @@ class TextTokenizer:
             return []
         if len(text.strip()) == 1:
             return self.sp_model.Encode(text, out_type=kwargs.pop("out_type", int), **kwargs)
+        # Pre-process: convert newlines to spaces to prevent word merging
+        text = text.replace("\r", "").replace("\n", " ")
         # 预处理
         if self.normalizer:
             text = self.normalizer.normalize(text)
@@ -583,21 +585,24 @@ class TextTokenizer:
                 # Search backwards from the end
                 for k in range(len(current_segment) - 1, int(len(current_segment) * 0.5), -1):
                     # Check if token is a space or starts with space (SentencePiece often prefixes with space/underscore)
-                    # Common SP tokens: " " (U+2581)
-                    if " " in current_segment[k] or current_segment[k] == " ":
+                    # SentencePiece uses ' ' (U+2581) as the space delimiter.
+                    # We accept either U+2581 or ASCII space (just in case).
+                    tok = current_segment[k]
+                    if "\u2581" in tok or " " in tok:
                         split_idx = k
                         break
                 
                 if split_idx != -1:
                     # Split at the found space
+                    # Note: The split happens BEFORE the token at split_idx.
+                    # Since split_idx points to a token starting with space (e.g. "_Word"),
+                    # "_Word" should be the START of the new segment.
+                    # So current_segment[:split_idx] is the first chunk (ending with previous word).
                     segments.append(current_segment[:split_idx])
                     # The remaining part becomes the new current_segment
-                    # We need to restart accumulation with the remainders
                     remainder = current_segment[split_idx:]
                     current_segment = remainder
                     current_segment_tokens_len = len(remainder)
-                    # Warn less aggressively since this is a "smart" chop
-                    # warnings.warn(...) 
                 else:
                     # Fallback to blind chop if no space found (unexpected for normal text)
                     sub_segments = []
