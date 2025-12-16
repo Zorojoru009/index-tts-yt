@@ -873,10 +873,10 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     gr.Markdown(f"**{i18n('GPT2 Sampling Settings')}** _{i18n('Parameters affect audio diversity and generation speed. See')} [Generation strategies](https://huggingface.co/docs/transformers/main/en/generation_strategies)._")
                     with gr.Row():
                         do_sample = gr.Checkbox(label="do_sample", value=True, info=i18n("Whether to perform sampling"))
-                        temperature = gr.Slider(label="temperature", minimum=0.1, maximum=2.0, value=0.8, step=0.1)
+                        temperature = gr.Slider(label="temperature", minimum=0.1, maximum=2.0, value=0.61, step=0.01)
                     with gr.Row():
-                        top_p = gr.Slider(label="top_p", minimum=0.0, maximum=1.0, value=0.8, step=0.01)
-                        top_k = gr.Slider(label="top_k", minimum=0, maximum=100, value=30, step=1)
+                        top_p = gr.Slider(label="top_p", minimum=0.0, maximum=1.0, value=0.91, step=0.01)
+                        top_k = gr.Slider(label="top_k", minimum=0, maximum=100, value=0, step=1, visible=False) # Unexposed/High (0 usually means unrestricted or max)
                         num_beams = gr.Slider(label="num_beams", value=3, minimum=1, maximum=10, step=1)
                     with gr.Row():
                         repetition_penalty = gr.Number(label="repetition_penalty", precision=None, value=10.0, minimum=0.1, maximum=20.0, step=0.1)

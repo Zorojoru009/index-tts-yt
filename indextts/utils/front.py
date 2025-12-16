@@ -142,7 +142,7 @@ class TextNormalizer:
             print("Error, text normalizer is not initialized !!!")
             return ""
         if self.use_chinese(text):
-            text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+            # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
             # 应用术语词汇表（优先级最高，在所有保护之前）
             if self.enable_glossary:
                 text = self.apply_glossary_terms(text, lang="zh")
@@ -166,7 +166,7 @@ class TextNormalizer:
             result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
-                text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
+                # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
                 # 应用术语词汇表（优先级最高，在所有保护之前）
                 if self.enable_glossary:
                     text = self.apply_glossary_terms(text, lang="en")

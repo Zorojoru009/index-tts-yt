@@ -1,0 +1,271 @@
+# IndexTTS v2 – Script Structuring & Pronunciation Stability Guide
+
+## Purpose
+
+This document defines **deterministic rules** for writing and preprocessing scripts so that IndexTTS v2 produces **stable, intelligible speech**, specifically preventing the failure mode where **“it is” collapses into a sound resembling “ft”**.
+
+This guide is intended for **future AI agents** operating IndexTTS v2 (or similar autoregressive TTS systems).
+
+---
+
+## Core Insight (Non‑Negotiable)
+
+IndexTTS v2 is **autoregressive and subword‑token based**. It does *not* preserve words; it preserves **acoustic probability**.
+
+Low‑stress function words (e.g., *it, is, to, of*) are **sacrificed first** when:
+
+* prosodic boundaries are weak
+* speech rate is high
+* duration is compressed
+
+**“It is” is a known collapse point.**
+
+---
+
+## Failure Signature
+
+### Symptom
+
+* "it is" is rendered as a clipped fricative
+* Perceived as: `ft`, `f t`, or hiss + stop
+
+### Root Cause
+
+* Subword token collision
+* Missing or weak prosodic boundary
+* Duration underflow on function words
+
+This is **front‑end failure**, not vocoder failure.
+
+---
+
+## Hard Rules (Must Follow)
+
+### Rule 1 — Never leave “it is” unprotected
+
+❌ Invalid:
+
+```
+It is important to understand this.
+```
+
+✅ Valid (choose one):
+
+```
+It's important to understand this.
+It is, important to understand this.
+It is — important to understand this.
+It is. Important to understand this.
+```
+
+---
+
+### Rule 2 — Prefer contractions by default
+
+* Use **contractions** for all common function‑word pairs unless formality explicitly forbids it.
+
+Examples:
+
+* it is → it's
+* that is → that's
+* there is → there's
+
+Rationale: contractions map to **single stable acoustic templates**.
+
+---
+
+### Rule 3 — Force boundaries when expanding
+
+If the expanded form *must* be used, **force duration**:
+
+```
+It is, without question, the only way.
+It is — and always has been — the truth.
+```
+
+Punctuation = duration allocation.
+
+---
+
+### Rule 4 — Protect weak phrases with stressed neighbors
+
+Add a stressed word immediately after weak phrases.
+
+❌ Risky:
+
+```
+It is important to know this.
+```
+
+✅ Safer:
+
+```
+It is very important to know this.
+It is absolutely necessary to know this.
+```
+
+---
+
+### Rule 5 — Avoid long unbroken paragraphs
+
+Generate at:
+
+* sentence level, or
+* clause level
+
+Long paragraphs increase **duration compression errors**.
+
+---
+
+## Text Normalization Rules
+
+Before TTS inference, **always normalize**:
+
+* Expand abbreviations: `vs → versus`, `ft → feet` (if unit)
+* Expand numbers: `10k → ten thousand`
+* Avoid ALL CAPS unless spelling letters individually
+
+Normalization errors propagate into acoustic collapse.
+
+---
+
+## Phoneme Confusion: FEAR → FAIR (Vowel Drift)
+
+### Symptom
+
+* The word **“fear”** is rendered as **“fair”**.
+
+### Root Cause
+
+* Vowel drift between /ɪə/ (fear) and /ɛə/ (fair)
+* Insufficient r‑coloring under fast or neutral prosody
+* Accent‑agnostic training data biases toward flatter vowels
+
+This is **not** a spelling error. It is a **vowel resolution failure** under low stress.
+
+### Mandatory Fixes
+
+✅ Preferred rewrite (most reliable):
+
+```
+fear → feer
+```
+
+(orthographic elongation forces /ɪr/)
+
+✅ Boundary + stress reinforcement:
+
+```
+fear — real fear
+true fear itself
+```
+
+✅ Protective modifiers:
+
+```
+raw fear
+deep fear
+pure fear
+```
+
+❌ Avoid isolated usage:
+
+```
+fear is powerful
+```
+
+### Extreme Control (if supported)
+
+* Force phoneme override: /fɪr/
+* Slight duration increase on the token
+
+### Agent Rule
+
+> The word “fear” must **never** appear unstressed or sentence‑initial without protection.
+
+---
+
+## Duration & Style Constraints
+
+* Avoid “fast” or “high‑energy” style prompts when clarity matters
+* If duration control is available, **increase base duration slightly**
+* Short words require **minimum phoneme time**
+
+Fast + weak words = deletion.
+
+---
+
+## Known High‑Risk Phrases
+
+AI agents should automatically rewrite or guard:
+
+* it is
+* it was
+* it has
+* there is
+* there are
+* that it is
+* which is
+* fear (→ fair collapse risk)
+
+These should **never** appear raw in final TTS text.
+
+---
+
+## Recommended Preprocessing Pipeline
+
+```
+Raw Script
+ → Text Normalization
+ → Contraction Policy
+ → Boundary Injection (commas / dashes)
+ → Optional Duration Control
+ → IndexTTS v2 Inference
+```
+
+---
+
+## Example Rewrite
+
+Original:
+
+```
+It is important to understand power.
+```
+
+Approved rewrites:
+
+```
+It's important to understand power.
+It is — important to understand power.
+It is very important to understand power.
+```
+
+---
+
+## Mental Model for AI Agents
+
+IndexTTS v2 optimizes **flow**, not **grammar**.
+
+Weak words survive **only if structure protects them**.
+
+If a word:
+
+* is short
+* unstressed
+* common
+* unbounded
+
+→ it will be compressed or erased.
+
+**Structure is authority.**
+
+---
+
+## Final Directive
+
+> Do not ask whether the model will pronounce it correctly.
+> Rewrite the text so it has no choice.
+
+This is not stylistic preference.
+It is **control**.
