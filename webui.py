@@ -615,10 +615,10 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     # Save individual chunk
                     chunk_filename = f"chunk_{int(time.time())}_{chunk_idx}.wav"
                     chunk_filepath = os.path.join(chunks_dir, chunk_filename)
-                    # Save individual chunk using soundfile with explicit Int16 conversion
+                    # Save individual chunk using soundfile with safe float->int16 conversion
                     chunk_np = item.detach().cpu().numpy().flatten()
-                    chunk_int16 = (chunk_np * 32767).astype(np.int16)
-                    sf.write(chunk_filepath, chunk_int16, 24000)
+                    # Ensure Float32/64 is safely clipped and saved as standard PCM_16
+                    sf.write(chunk_filepath, chunk_np, 24000, subtype='PCM_16')
                     
                     # Phase 2: Validate
                     val_score = 0.0
@@ -658,7 +658,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
 
                     yield {
                         streaming_log: gr.update(value="\n".join(log_lines)),
-                        output_audio: (24000, np.concatenate(all_audio_chunks)),
+                        # CRITICAL FIX: Yield ONLY the new chunk. Gradio accumulates automatically when streaming=True.
+                        output_audio: (24000, chunk_np), 
                         download_file: None,
                         chunk_state: chunk_data_accumulator,
                         chunk_list: gr.update(value=df_data)
@@ -790,9 +791,10 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             return chunk_state, gr.update(), None
 
         path = target_chunk["audio_path"]
-        # Save audio (Overwrite) using soundfile + Int16 conversion
-        audio_int16 = (audio_data * 32767).astype(np.int16)
-        sf.write(path, audio_int16, sr)
+        path = target_chunk["audio_path"]
+        # Save audio (Overwrite) using soundfile (safe PCM_16)
+        # remove manual conversion, let sf handle clipping/casting
+        sf.write(path, audio_data, sr, subtype='PCM_16')
         
         # Re-Validate
         score = 0
