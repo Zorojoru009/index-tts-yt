@@ -63,6 +63,10 @@ dependencies = [
   "datasets>=2.14.0,<2.19.0",  # Pin for funasr/modelscope compatibility
   "simplejson>=3.17.0",
   "sortedcontainers>=2.4.0",
+  "onnxruntime>=1.14.0",  # Required by funasr for inference
+  "kaldiio>=2.17.0",  # Required by funasr for audio I/O
+  "librosa>=0.10.0",  # Required by modelscope for audio processing
+  "scipy>=1.9.0",  # Required by various audio processing
 
   # Use "wetext" on Windows/Mac, otherwise "WeTextProcessing" on Linux.
   "wetext>=0.0.9; sys_platform != 'linux'",

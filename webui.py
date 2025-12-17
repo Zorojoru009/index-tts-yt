@@ -699,9 +699,11 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
             sf.write(output_path, final_audio, 24000, subtype='PCM_16')
             
             log_lines.append(f"✅ Generation Complete! Saved to {output_path}")
+            # CRITICAL FIX: Don't re-yield audio (already sent during streaming)
+            # Only update log and download file to avoid duplication
             yield {
                 streaming_log: gr.update(value="\n".join(log_lines)),
-                output_audio: (24000, final_audio),
+                output_audio: gr.update(),  # Don't update (keeps last streamed audio)
                 download_file: output_path,
                 chunk_state: chunk_data_accumulator,
                 chunk_list: gr.update(value=df_data)
