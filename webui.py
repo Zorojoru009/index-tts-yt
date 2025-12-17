@@ -53,7 +53,11 @@ import torch
 import gradio as gr
 from concurrent.futures import ThreadPoolExecutor
 from indextts.infer_v2 import IndexTTS2
+from indextts.infer_v2 import IndexTTS2
 from tools.i18n.i18n import I18nAuto
+import numpy as np
+import torchaudio
+import scipy.io.wavfile
 
 class MultiGPUManager:
     def __init__(self, cmd_args):
@@ -572,13 +576,18 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         
         chunk_idx = 0
         all_audio_chunks = []  # Accumulate all chunks for final concatenation
+        
+        # Phase 1: Chunk Data Accumulator
+        chunk_data_accumulator = [] 
+        chunks_dir = os.path.join(output_dir, "chunks")
+        os.makedirs(chunks_dir, exist_ok=True)
 
         for item in generator:
             if isinstance(item, torch.Tensor):
                 # Check silence
                 is_silence = torch.all(item == 0)
                 chunk_end_time = time.time()
-                audio_duration = item.shape[-1] / 22050
+                audio_duration = item.shape[-1] / 24000 # Assume 24k
 
                 if not is_silence:
                     chunk_idx += 1
@@ -587,109 +596,74 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
 
                     rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
 
-                    raw_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else ""
+                    raw_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else "End"
                     segment_text = raw_text.replace(' ', ' ').replace(' ', ' ')
 
                     log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed in {chunk_duration:.2f}s")
                     log_lines.append(f"   📊 RTF: {rtf:.4f} | Audio: {audio_duration:.2f}s")
                     log_lines.append(f"   📝 Text: {segment_text[:50]}...")
+                    
+                    # Save individual chunk
+                    chunk_filename = f"chunk_{int(time.time())}_{chunk_idx}.wav"
+                    chunk_filepath = os.path.join(chunks_dir, chunk_filename)
+                    # item is [1, T] usually. torchaudio expects [C, T].
+                    # Ensure CPU
+                    chunk_tensor = item.detach().cpu()
+                    if chunk_tensor.dim() == 1:
+                        chunk_tensor = chunk_tensor.unsqueeze(0)
+                    
+                    torchaudio.save(chunk_filepath, chunk_tensor, 24000)
+                    
+                    chunk_info = {
+                        "index": chunk_idx,
+                        "text": segment_text,
+                        "audio_path": chunk_filepath, # Absolute or relative? Gradio likes filepaths.
+                        "status": "Generated"
+                    }
+                    chunk_data_accumulator.append(chunk_info)
+                    
+                    # Format for Dataframe: [Index, Text, Status]
+                    df_data = [[c["index"], c["text"], c["status"]] for c in chunk_data_accumulator]
 
                     # Estimate remaining time
                     if chunk_idx < total_segments:
-                        # Distributed estimation is tricky, simple linear approx
                         avg_chunk_time = (chunk_end_time - start_time) / chunk_idx
-                        remaining_time = avg_chunk_time * (total_segments - chunk_idx) / len(target_gpus) # Simple factor
-                        log_lines.append(f"   ⏱️ Est. remaining: {remaining_time:.1f}s")
+                        remaining_chunks = total_segments - chunk_idx
+                        eta = avg_chunk_time * remaining_chunks
+                        log_lines.append(f"   ⏳ ETA: {eta:.1f}s")
 
-                    log_lines.append("-" * 50)
+                    all_audio_chunks.append(item.cpu().numpy().flatten())
 
-                    # Store chunk for final concatenation
-                    if isinstance(item, torch.Tensor):
-                        all_audio_chunks.append(item.cpu())
-                    else:
-                        all_audio_chunks.append(item)
-
-                if len(log_lines) > 100: log_lines = log_lines[-100:]
-
-                yield {
-                    streaming_log: gr.update(value="\n".join(log_lines)),
-                    output_audio: (22050, item.numpy().T) if hasattr(item, 'numpy') else item,
-                    download_file: None
-                }
-        
-        # Concatenate all chunks and save to file
-        import numpy as np
-        from scipy.io import wavfile
-
-        if all_audio_chunks:
-            log_lines.append("=" * 50)
-            log_lines.append("🔧 Concatenating audio chunks...")
-
-            # Concatenate all chunks
-            try:
-                concatenated_audio = torch.cat(all_audio_chunks, dim=-1)
-
-                # Convert to numpy
-                if isinstance(concatenated_audio, torch.Tensor):
-                    audio_data = concatenated_audio.cpu().numpy()
+                    yield {
+                        streaming_log: gr.update(value="\n".join(log_lines)),
+                        output_audio: (24000, np.concatenate(all_audio_chunks)),
+                        download_file: None,
+                        chunk_state: chunk_data_accumulator,
+                        chunk_list: gr.update(value=df_data)
+                    }
                 else:
-                    audio_data = concatenated_audio
+                    # Silence chunk.. handle if needed
+                    pass
+            elif isinstance(item, dict):
+                 # Handle status updates from generator if any
+                 pass
+        if len(all_audio_chunks) > 0:
+            final_audio = np.concatenate(all_audio_chunks)
+            # Ensure int16
+            if final_audio.dtype == np.float32:
+                 final_audio = (final_audio * 32767).astype(np.int16)
+            
+            scipy.io.wavfile.write(output_path, 24000, final_audio)
+            
+            log_lines.append(f"✅ Generation Complete! Saved to {output_path}")
+            yield {
+                streaming_log: gr.update(value="\n".join(log_lines)),
+                output_audio: (24000, final_audio),
+                download_file: output_path,
+                chunk_state: chunk_data_accumulator,
+                chunk_list: gr.update(value=df_data)
+            }
 
-                # Ensure correct shape: (samples,) for mono or (samples, channels) for multi-channel
-                if len(audio_data.shape) == 2 and audio_data.shape[0] < audio_data.shape[1]:
-                    # If shape is (channels, samples), transpose to (samples, channels)
-                    audio_data = audio_data.T
-
-                # Normalize and convert to int16
-                audio_data = np.asarray(audio_data)
-
-                # If values are in range [-1, 1], convert to int16 range
-                if audio_data.max() <= 1.0 and audio_data.min() >= -1.0:
-                    audio_data = (audio_data * 32767).astype(np.int16)
-                else:
-                    # Already in int16 range
-                    audio_data = audio_data.astype(np.int16)
-
-                # Save to file using scipy
-                wavfile.write(output_path, 22050, audio_data)
-
-                # Verify file
-                if os.path.exists(output_path):
-                    file_size = os.path.getsize(output_path)
-                    if len(audio_data.shape) == 1:
-                        num_samples = len(audio_data)
-                    else:
-                        num_samples = audio_data.shape[0]
-                    file_duration = num_samples / 22050
-                    log_lines.append(f"✅ Concatenation complete!")
-                    log_lines.append(f"📊 Total samples: {num_samples:,}")
-                    log_lines.append(f"⏱️ Duration: {file_duration:.2f}s")
-                    log_lines.append(f"💾 File size: {file_size / 1024:.1f} KB")
-                else:
-                    log_lines.append(f"❌ Error: Failed to save concatenated audio!")
-            except Exception as concat_error:
-                log_lines.append(f"❌ Concatenation error: {str(concat_error)}")
-                import traceback
-                traceback.print_exc()  # Print full error for debugging
-
-        # Final summary
-        avg_rtf = sum([(chunk_times[i] - (chunk_times[i-1] if i > 0 else start_time)) for i in range(len(chunk_times))]) / ((chunk_times[-1] - start_time) / len(chunk_times)) if chunk_times else 0
-        total_time = time.time() - start_time
-        log_lines.append("=" * 50)
-        log_lines.append(f"🎉 Generation complete!")
-        log_lines.append(f"⏱️ Total time: {total_time:.2f}s")
-        log_lines.append(f"📊 Average RTF: {avg_rtf:.4f}")
-        log_lines.append(f"💾 Saved to: {output_path}")
-        log_lines.append("=" * 50)
-
-        # NOTE: Do NOT yield output_path to output_audio, as it causes repetition in streaming mode
-        # Instead, yield it to download_file component
-        yield {
-            streaming_log: gr.update(value="\n".join(log_lines)),
-            output_audio: None,
-            download_file: output_path
-        }
-        
     except Exception as e:
         log_lines.append("=" * 50)
         log_lines.append(f"❌ Error: {str(e)}")
@@ -699,6 +673,19 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
             output_audio: None,
             download_file: None
         }
+
+def on_select_chunk(evt: gr.SelectData, chunk_state):
+    if not chunk_state:
+        return "", None, -1
+    
+    # evt.index is [row, col]
+    row_idx = evt.index[0]
+    if row_idx < 0 or row_idx >= len(chunk_state):
+        return "", None, -1
+        
+    chunk = chunk_state[row_idx]
+    # Return text, audio_path, index
+    return chunk["text"], chunk["audio_path"], chunk["index"]
 
 def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                 emo_ref_path, emo_weight,
@@ -735,7 +722,9 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
         yield {
             streaming_log: gr.update(value="", visible=False),
             output_audio: result,
-            download_file: result  # In batch mode, result is the file path
+            download_file: result,  # In batch mode, result is the file path
+            chunk_state: [],
+            chunk_list: gr.update(value=None)
         }
 
 def update_prompt_audio():
@@ -766,10 +755,32 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                     preload_voice_btn = gr.Button("🔄 " + i18n("Preload Voice"), scale=1, variant="secondary")
                     gen_button = gr.Button(i18n("Generate Speech"), key="gen_button",interactive=True, scale=2, variant="primary")
                 voice_status = gr.Markdown("⏳ " + i18n("Voice not preloaded"))
+            
             with gr.Column():
+
                 output_audio = gr.Audio(label=i18n("Generation Result"), visible=True,key="output_audio", streaming=True)
                 download_file = gr.File(label=i18n("Download Audio"), visible=True)
         
+        # Review Panel (Phase 1 MVP)
+        with gr.Row():
+            with gr.Accordion(i18n("Review & Edit Chunks"), open=True, visible=True) as review_accordion:
+                chunk_state = gr.State([]) # Stores list of dicts: [{'index', 'text', 'audio_path', 'status'}]
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        chunk_list = gr.Dataframe(
+                            headers=["Index", "Text Segment", "Status"],
+                            datatype=["number", "str", "str"],
+                            interactive=False,
+                            label=i18n("Chunks List"),
+                            max_height=400
+                        )
+                    with gr.Column(scale=2):
+                        selected_chunk_idx = gr.Number(label=i18n("Chunk Index"), visible=False, value=-1)
+                        selected_chunk_text = gr.Textbox(label=i18n("Edit Text Segment"), lines=4, interactive=True)
+                        selected_chunk_audio = gr.Audio(label=i18n("Chunk Preview"), type="filepath")
+                        btn_regen_chunk = gr.Button(i18n("Regenerate This Chunk"))
+                        # btn_merge_all = gr.Button(i18n("Merge All Accepted"), variant="primary")
+
         with gr.Row():
             streaming_log = gr.Textbox(
                 label=i18n("Generation Log"),
@@ -1156,7 +1167,14 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 interval_silence,
                 *advanced_params,
         ],
-        outputs=[streaming_log, output_audio, download_file]
+        outputs=[streaming_log, output_audio, download_file, chunk_state, chunk_list]
+    )
+    
+    # Phase 1: Chunk List Event
+    chunk_list.select(
+        fn=on_select_chunk,
+        inputs=[chunk_state],
+        outputs=[selected_chunk_text, selected_chunk_audio, selected_chunk_idx]
     )
 
 

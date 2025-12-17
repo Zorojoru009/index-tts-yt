@@ -41,27 +41,23 @@ The current "Single Player" output will be replaced or augmented by a **"Chunk R
 *   **Regenerate Button:** When clicked, sends a specific request to re-generate *only* Chunk #2 with a different random seed or slight parameter tweak.
 *   **Merge & Download:** A global button to concatenate all "Accepted" chunks into the final WAV file.
 
-## 6. Implementation Steps (Draft)
+## 6. Implementation Roadmap
 
-1.  **Dependencies:**
-    *   Add `funasr` (or ensure `modelscope` capabilities) to `requirements.txt`.
-    *   Add `python-Levenshtein`.
+### Phase 1: Minimum Viable Product (The "Review Panel")
+**Goal:** Manual review and regeneration capability. No AI validation yet.
+1.  **Backend:** Split `gen_single_streaming` to allow generating specific chunk indices (e.g., `gen_chunk(index=5)`).
+2.  **Frontend:** Build the **Master-Detail UI**.
+    *   List View: Table of all chunks.
+    *   Detail View: Player + Text Editor + "Regenerate This Chunk" button.
+    *   Merge: "Combine All" button.
+*   **Result:** You can manually fix bad chunks, but you have to find them yourself by listening.
 
-2.  **Backend (`indextts/utils/validation.py`):**
-    ```python
-    class AudioValidator:
-        def __init__(self, device='cpu'):
-            self.model = load_model("paraformer", device=device)
-        
-        def validate(self, audio, text):
-            transcript = self.model.transcribe(audio)
-            score = calculate_similarity(transcript, text)
-            return score, transcript
-    ```
-
-3.  **Integration (`webui.py`):**
-    *   Initialize `AudioValidator` on startup (lazy load).
-    *   Update `gen_single_streaming` to yield `(audio, chunk_metadata, validation_score)`.
-
-4.  **Frontend (`webui.py`):**
-    *   Replace `gr.Audio` output with `gr.Gallery` or `gr.Dataframe` + `gr.Audio` components for granular control.
+### Phase 2: Automated Intelligence (STT Integration)
+**Goal:** The system tells *you* which chunks are bad.
+1.  **Dependencies:** Install `funasr` and `python-Levenshtein`.
+2.  **Backend:** Implement `AudioValidator` (CPU-based).
+3.  **Integration:**
+    *   Run Validation after each chunk generation.
+    *   Feed the `Score` into the Phase 1 List View.
+    *   **Auto-Sort:** Put the lowest underscores (red flags) at the top of the list.
+*   **Result:** You only review the 5% of chunks that the AI flagged as "Suspicious". Massive time saver.
