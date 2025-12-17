@@ -488,6 +488,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
             vec = list(emo_dict.values())
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
+    print(f"[DEBUG] Generation params: prompt={prompt}, emo_ref_path={emo_ref_path}")
     
     # Calculate segments for progress tracking using primary model
     text_tokens_list = tts.tokenizer.tokenize(text)
@@ -614,8 +615,20 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     chunk_filepath = os.path.join(chunks_dir, chunk_filename)
                     # Save individual chunk using soundfile with safe float->int16 conversion
                     chunk_np = item.detach().cpu().numpy().flatten()
+                    
+                    # DEBUG: Log tensor properties
+                    print(f"[DEBUG] Chunk {chunk_idx}:")
+                    print(f"  - Raw tensor shape: {item.shape}, dtype: {item.dtype}")
+                    print(f"  - Numpy shape: {chunk_np.shape}, dtype: {chunk_np.dtype}")
+                    print(f"  - Value range: [{chunk_np.min():.4f}, {chunk_np.max():.4f}]")
+                    
                     # Ensure Float32/64 is safely clipped and saved as standard PCM_16
                     sf.write(chunk_filepath, chunk_np, 24000, subtype='PCM_16')
+                    
+                    # DEBUG: Verify saved file
+                    test_load, test_sr = sf.read(chunk_filepath)
+                    print(f"  - After save/load: shape={test_load.shape}, dtype={test_load.dtype}, sr={test_sr}")
+                    print(f"  - After save/load range: [{test_load.min():.4f}, {test_load.max():.4f}]")
                     
                     # Phase 2: Validate
                     val_score = 0.0
@@ -652,6 +665,10 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         log_lines.append(f"   ⏳ ETA: {eta:.1f}s")
 
                     all_audio_chunks.append(item.cpu().numpy().flatten())
+                    
+                    # DEBUG: Log accumulation
+                    accumulated = np.concatenate(all_audio_chunks)
+                    print(f"  - Accumulated audio: shape={accumulated.shape}, range=[{accumulated.min():.4f}, {accumulated.max():.4f}]")
 
                     yield {
                         streaming_log: gr.update(value="\n".join(log_lines)),
