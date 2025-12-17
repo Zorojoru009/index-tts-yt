@@ -735,7 +735,7 @@ def on_select_chunk(evt: gr.SelectData, chunk_state):
 def merge_chunks(chunk_state):
     """Concatenate all chunks in the state into one file"""
     if not chunk_state:
-        return None
+        return "⚠️ No chunks to merge", None, None
     
     try:
         # Sort by index just in case
@@ -751,7 +751,7 @@ def merge_chunks(chunk_state):
                 print(f"Details: Missing chunk path {path}")
         
         if not all_data:
-            return None
+            return "❌ No valid audio chunks found", None, None
             
         final_audio = np.concatenate(all_data)
         
@@ -762,10 +762,17 @@ def merge_chunks(chunk_state):
         
         # Enforce PCM_16 for merged file compatibility
         sf.write(output_path, final_audio, 24000, subtype='PCM_16')
-        return output_path
+        
+        status_msg = f"✅ Merged {len(all_data)} chunks! Saved to: {output_path}"
+        print(status_msg)
+        
+        # Return status, audio tuple for preview, and file path for download
+        return status_msg, (24000, final_audio), output_path
+        
     except Exception as e:
-        print(f"Merge error: {e}")
-        return None
+        error_msg = f"❌ Merge error: {str(e)}"
+        print(error_msg)
+        return error_msg, None, None
 
 def regenerate_chunk_handler(chunk_idx, new_text, chunk_state, 
                            emo_control_method, prompt, 
@@ -947,7 +954,12 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         selected_chunk_text = gr.Textbox(label=i18n("Edit Text Segment"), lines=4, interactive=True)
                         selected_chunk_audio = gr.Audio(label=i18n("Chunk Preview"), type="filepath")
                         btn_regen_chunk = gr.Button(i18n("Regenerate This Chunk"), variant="secondary")
-                        btn_merge_all = gr.Button(i18n("Merge All Accepted"), variant="primary")
+                        
+                        # Merge Section
+                        gr.Markdown("---")
+                        merge_status = gr.Textbox(label=i18n("Merge Status"), lines=2, interactive=False, visible=True)
+                        merged_audio_preview = gr.Audio(label=i18n("Merged Audio Preview"), type="numpy")
+                        btn_merge_all = gr.Button(i18n("Merge All Chunks"), variant="primary")
 
         with gr.Row():
             streaming_log = gr.Textbox(
@@ -1341,7 +1353,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     btn_merge_all.click(
         fn=merge_chunks,
         inputs=[chunk_state],
-        outputs=[download_file]
+        outputs=[merge_status, merged_audio_preview, download_file]
     )
     # Phase 1: Chunk List Event
     chunk_list.select(
