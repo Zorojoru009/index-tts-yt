@@ -811,8 +811,13 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             return chunk_state, gr.update(), None
 
         path = target_chunk["audio_path"]
+        
+        # CRITICAL: Normalize audio like in main generation
+        # Audio from gen_single should already be normalized, but verify
+        audio_normalized = audio_data / 32767.0 if np.abs(audio_data).max() > 1.0 else audio_data
+        
         # Save audio (Overwrite) using soundfile (safe PCM_16)
-        sf.write(path, audio_data, sr, subtype='PCM_16')
+        sf.write(path, audio_normalized, sr, subtype='PCM_16')
         
         # Re-Validate
         score = 0
@@ -836,7 +841,8 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
         # Headers: ["Index", "Text Segment", "Status", "Score"]
         df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunk_state]
         
-        return chunk_state, gr.update(value=df_data), path
+        # CRITICAL FIX: Return (sr, audio_data) tuple for Gradio Audio component
+        return chunk_state, gr.update(value=df_data), (sr, audio_normalized)
 
     except Exception as e:
         print(f"Regeneration error: {e}")
