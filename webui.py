@@ -450,20 +450,32 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
     
     # set gradio progress
     tts.gr_progress = progress
+    
+    # CRITICAL: Upack args to match advanced_params from UI
+    # UI sends: [do_sample, top_p, top_k, temperature, length_penalty, num_beams, repetition_penalty, max_mel_tokens]
     do_sample, top_p, top_k, temperature, \
         length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
+    
     kwargs = {
         "do_sample": bool(do_sample),
         "top_p": float(top_p),
         "top_k": int(top_k) if int(top_k) > 0 else None,
         "temperature": float(temperature),
-        "length_penalty": float(length_penalty),
-        "num_beams": num_beams,
         "repetition_penalty": float(repetition_penalty),
+        "length_penalty": float(length_penalty),
+        "num_beams": int(num_beams),
         "max_mel_tokens": int(max_mel_tokens),
+        "interval_silence": int(interval_silence)
     }
-    # Pass interval_silence in kwargs
-    kwargs["interval_silence"] = int(interval_silence)
+    
+    # DEBUG: Log generation parameters
+    print(f"[DEBUG] Generation kwargs: {kwargs}")
+    print(f"  - Temperature: {kwargs['temperature']}")
+    print(f"  - Top P: {kwargs['top_p']}")
+    print(f"  - Top K: {kwargs['top_k']}")
+    print(f"  - Repetition Penalty: {kwargs['repetition_penalty']}")
+    print(f"  - Interval Silence: {kwargs['interval_silence']}ms")
+
 
     # Convert emo_control_method from string (Gradio Radio value) to index
     if isinstance(emo_control_method, str):
