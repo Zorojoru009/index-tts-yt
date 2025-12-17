@@ -60,7 +60,7 @@ dependencies = [
   "funasr>=1.1.18",
   "python-Levenshtein>=0.23.0",
   "soundfile>=0.12.1",
-  "datasets>=2.14.0",
+  "datasets>=2.14.0,<2.19.0",  # Pin for funasr/modelscope compatibility
 
   # Use "wetext" on Windows/Mac, otherwise "WeTextProcessing" on Linux.
   "wetext>=0.0.9; sys_platform != 'linux'",
