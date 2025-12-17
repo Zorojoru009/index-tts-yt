@@ -53,7 +53,7 @@ import torch
 import gradio as gr
 from concurrent.futures import ThreadPoolExecutor
 from indextts.infer_v2 import IndexTTS2
-from indextts.infer_v2 import IndexTTS2
+from indextts.utils.validation import get_validator
 from tools.i18n.i18n import I18nAuto
 import numpy as np
 import torchaudio
@@ -581,6 +581,13 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         chunk_data_accumulator = [] 
         chunks_dir = os.path.join(output_dir, "chunks")
         os.makedirs(chunks_dir, exist_ok=True)
+        
+        # Phase 2: Initialize Validator (Lazy)
+        validator = None
+        try:
+             validator = get_validator()
+        except:
+             pass
 
         for item in generator:
             if isinstance(item, torch.Tensor):
@@ -606,24 +613,41 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     # Save individual chunk
                     chunk_filename = f"chunk_{int(time.time())}_{chunk_idx}.wav"
                     chunk_filepath = os.path.join(chunks_dir, chunk_filename)
-                    # item is [1, T] usually. torchaudio expects [C, T].
-                    # Ensure CPU
-                    chunk_tensor = item.detach().cpu()
-                    if chunk_tensor.dim() == 1:
-                        chunk_tensor = chunk_tensor.unsqueeze(0)
                     
-                    torchaudio.save(chunk_filepath, chunk_tensor, 24000)
+                    # Convert to numpy and int16 pcm for standard WAV compatibility
+                    chunk_np = item.detach().cpu().numpy().flatten()
+                    # Check normalization
+                    if chunk_np.dtype == np.float32:
+                        chunk_np = (chunk_np * 32767).astype(np.int16)
+                    
+                    scipy.io.wavfile.write(chunk_filepath, 24000, chunk_np)
+                    
+                    # Phase 2: Validate
+                    val_score = 0.0
+                    status_text = "Generated"
+                    if validator:
+                        val_score, trans = validator.validate(segment_text, chunk_filepath)
+                        log_lines.append(f"   🔍 Match: {val_score}%")
+                        if val_score >= 90:
+                            status_text = "✅ Exact"
+                        elif val_score >= 75:
+                            status_text = "⚠️ Good"
+                        elif val_score > 0:
+                            status_text = "❌ Low"
+                        else:
+                            status_text = "❓ Error"
                     
                     chunk_info = {
                         "index": chunk_idx,
                         "text": segment_text,
-                        "audio_path": chunk_filepath, # Absolute or relative? Gradio likes filepaths.
-                        "status": "Generated"
+                        "audio_path": chunk_filepath,
+                        "status": status_text,
+                        "score": val_score
                     }
                     chunk_data_accumulator.append(chunk_info)
                     
-                    # Format for Dataframe: [Index, Text, Status]
-                    df_data = [[c["index"], c["text"], c["status"]] for c in chunk_data_accumulator]
+                    # Format for Dataframe: [Index, Text, Status, Score]
+                    df_data = [[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator]
 
                     # Estimate remaining time
                     if chunk_idx < total_segments:
@@ -686,6 +710,126 @@ def on_select_chunk(evt: gr.SelectData, chunk_state):
     chunk = chunk_state[row_idx]
     # Return text, audio_path, index
     return chunk["text"], chunk["audio_path"], chunk["index"]
+
+def merge_chunks(chunk_state):
+    """Concatenate all chunks in the state into one file"""
+    if not chunk_state:
+        return None
+    
+    try:
+        # Sort by index just in case
+        sorted_chunks = sorted(chunk_state, key=lambda x: x["index"])
+        all_data = []
+        
+        for chunk in sorted_chunks:
+            path = chunk.get("audio_path")
+            if path and os.path.exists(path):
+                sr, data = scipy.io.wavfile.read(path)
+                all_data.append(data)
+            else:
+                print(f"Details: Missing chunk path {path}")
+        
+        if not all_data:
+            return None
+            
+        final_audio = np.concatenate(all_data)
+        
+        output_dir = "outputs"
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"merged_{int(time.time())}.wav"
+        output_path = os.path.join(output_dir, filename)
+        
+        scipy.io.wavfile.write(output_path, 24000, final_audio)
+        return output_path
+    except Exception as e:
+        print(f"Merge error: {e}")
+        return None
+
+def regenerate_chunk_handler(chunk_idx, new_text, chunk_state, 
+                           emo_control_method, prompt, 
+                           emo_ref_path, emo_weight,
+                           vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                           emo_text, emo_random,
+                           max_text_tokens_per_segment,
+                           interval_silence,
+                           *args): # args = advanced_params
+    
+    if chunk_idx is None or chunk_idx < 0 or not chunk_state:
+        return chunk_state, gr.update(), None
+
+    # Call gen_single with NEW text
+    # Note: gen_single signature must match passed args.
+    # We pass 'new_text' as the 'text' argument.
+    # prompt is 'prompt_audio'
+    
+    try:
+        print(f"🔄 Regenerating chunk {chunk_idx}: {new_text[:20]}...")
+        result = gen_single(
+            emo_control_method, prompt, new_text,
+            emo_ref_path, emo_weight,
+            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+            emo_text, emo_random,
+            max_text_tokens_per_segment,
+            interval_silence,
+            *args
+        )
+        # result is (sr, audio_data)
+        sr, audio_data = result
+        
+        # Find chunk
+        target_chunk = None
+        target_idx = -1
+        chunk_idx = int(chunk_idx)
+        for i, c in enumerate(chunk_state):
+            if c["index"] == chunk_idx:
+                target_chunk = c
+                target_idx = i
+                break
+        
+        if not target_chunk:
+            print("Chunk not found in state")
+            return chunk_state, gr.update(), None
+
+        path = target_chunk["audio_path"]
+        
+        # Save audio (Overwrite)
+        if audio_data.dtype == np.float32:
+            audio_data = (audio_data * 32767).astype(np.int16)
+        
+        scipy.io.wavfile.write(path, sr, audio_data)
+        
+        # Re-Validate
+        score = 0
+        status = "Regenerated"
+        try:
+            validator = get_validator()
+            if validator:
+                 score, _ = validator.validate(new_text, path)
+                 if score >= 90: status = "✅ Regen"
+                 elif score >= 75: status = "⚠️ Regen"
+                 else: status = "❌ Regen"
+        except: pass
+        
+        # Update State
+        target_chunk["text"] = new_text
+        target_chunk["status"] = status
+        target_chunk["score"] = score
+        chunk_state[target_idx] = target_chunk
+        
+        # Update Dataframe
+        # Headers: ["Index", "Text Segment", "Status", "Score"]
+        df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunk_state]
+        
+        return chunk_state, gr.update(value=df_data), path
+
+    except Exception as e:
+        print(f"Regeneration error: {e}")
+        import traceback
+        traceback.print_exc()
+        return chunk_state, gr.update(), None
+
+
+
 
 def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                 emo_ref_path, emo_weight,
@@ -768,8 +912,8 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 with gr.Row():
                     with gr.Column(scale=3):
                         chunk_list = gr.Dataframe(
-                            headers=["Index", "Text Segment", "Status"],
-                            datatype=["number", "str", "str"],
+                            headers=["Index", "Text Segment", "Status", "Score"],
+                            datatype=["number", "str", "str", "number"],
                             interactive=False,
                             label=i18n("Chunks List"),
                             max_height=400
@@ -778,8 +922,8 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         selected_chunk_idx = gr.Number(label=i18n("Chunk Index"), visible=False, value=-1)
                         selected_chunk_text = gr.Textbox(label=i18n("Edit Text Segment"), lines=4, interactive=True)
                         selected_chunk_audio = gr.Audio(label=i18n("Chunk Preview"), type="filepath")
-                        btn_regen_chunk = gr.Button(i18n("Regenerate This Chunk"))
-                        # btn_merge_all = gr.Button(i18n("Merge All Accepted"), variant="primary")
+                        btn_regen_chunk = gr.Button(i18n("Regenerate This Chunk"), variant="secondary")
+                        btn_merge_all = gr.Button(i18n("Merge All Accepted"), variant="primary")
 
         with gr.Row():
             streaming_log = gr.Textbox(
@@ -1170,6 +1314,11 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         outputs=[streaming_log, output_audio, download_file, chunk_state, chunk_list]
     )
     
+    btn_merge_all.click(
+        fn=merge_chunks,
+        inputs=[chunk_state],
+        outputs=[download_file]
+    )
     # Phase 1: Chunk List Event
     chunk_list.select(
         fn=on_select_chunk,
@@ -1178,6 +1327,20 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     )
 
 
+
+    btn_regen_chunk.click(
+        fn=regenerate_chunk_handler,
+        inputs=[
+            selected_chunk_idx, selected_chunk_text, chunk_state,
+            emo_control_method, prompt_audio, emo_upload, emo_weight,
+            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+            emo_text, emo_random,
+            max_text_tokens_per_segment,
+            interval_silence,
+            *advanced_params
+        ],
+        outputs=[chunk_state, chunk_list, selected_chunk_audio]
+    )
 
 if __name__ == "__main__":
     demo.queue(20)
