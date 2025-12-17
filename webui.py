@@ -125,6 +125,7 @@ class MultiGPUManager:
                 emo_audio_prompt = None
 
             dummy_text = "test"
+            print(f"[DEBUG] Preloading GPU {gpu_id}: prompt={prompt_audio}, emo_audio={emo_audio_prompt}, emo_vec={emo_vector}")
             model.infer(
                 spk_audio_prompt=prompt_audio,
                 text=dummy_text,
@@ -383,6 +384,9 @@ def preload_voice(selected_gpus, prompt_audio, emo_upload, emo_control_method, e
                 progress(0.2, desc="Analyzing emotion text...")
                 emo_dict = tts.qwen_emo.inference(emo_text)
                 emo_vector = list(emo_dict.values())
+                print(f"[DEBUG] Extracted emotion from text: {emo_dict}")
+        
+        print(f"[DEBUG] Preload params: emo_method={emo_control_method}, emo_ref={emo_ref_path}, emo_vec={emo_vector}")
         
         yield "⏳ " + i18n("Caching embeddings on selected GPUs...")
         progress(0.4, desc="Caching embeddings...")
@@ -622,8 +626,12 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     print(f"  - Numpy shape: {chunk_np.shape}, dtype: {chunk_np.dtype}")
                     print(f"  - Value range: [{chunk_np.min():.4f}, {chunk_np.max():.4f}]")
                     
+                    # CRITICAL FIX: Model outputs int16-scale floats, normalize to -1.0..1.0
+                    chunk_np_normalized = chunk_np / 32767.0
+                    print(f"  - After normalization: [{chunk_np_normalized.min():.4f}, {chunk_np_normalized.max():.4f}]")
+                    
                     # Ensure Float32/64 is safely clipped and saved as standard PCM_16
-                    sf.write(chunk_filepath, chunk_np, 24000, subtype='PCM_16')
+                    sf.write(chunk_filepath, chunk_np_normalized, 24000, subtype='PCM_16')
                     
                     # DEBUG: Verify saved file
                     test_load, test_sr = sf.read(chunk_filepath)
@@ -664,7 +672,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         eta = avg_chunk_time * remaining_chunks
                         log_lines.append(f"   ⏳ ETA: {eta:.1f}s")
 
-                    all_audio_chunks.append(item.cpu().numpy().flatten())
+                    # CRITICAL FIX: Use normalized audio for accumulation
+                    all_audio_chunks.append(chunk_np_normalized)
                     
                     # DEBUG: Log accumulation
                     accumulated = np.concatenate(all_audio_chunks)
