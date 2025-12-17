@@ -615,9 +615,10 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     # Save individual chunk
                     chunk_filename = f"chunk_{int(time.time())}_{chunk_idx}.wav"
                     chunk_filepath = os.path.join(chunks_dir, chunk_filename)
-                    # Save individual chunk using soundfile (robust to float/int types)
+                    # Save individual chunk using soundfile with explicit Int16 conversion
                     chunk_np = item.detach().cpu().numpy().flatten()
-                    sf.write(chunk_filepath, chunk_np, 24000)
+                    chunk_int16 = (chunk_np * 32767).astype(np.int16)
+                    sf.write(chunk_filepath, chunk_int16, 24000)
                     
                     # Phase 2: Validate
                     val_score = 0.0
@@ -736,7 +737,8 @@ def merge_chunks(chunk_state):
         filename = f"merged_{int(time.time())}.wav"
         output_path = os.path.join(output_dir, filename)
         
-        sf.write(output_path, final_audio, 24000)
+        # Enforce PCM_16 for merged file compatibility
+        sf.write(output_path, final_audio, 24000, subtype='PCM_16')
         return output_path
     except Exception as e:
         print(f"Merge error: {e}")
@@ -788,8 +790,9 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             return chunk_state, gr.update(), None
 
         path = target_chunk["audio_path"]
-        # Save audio (Overwrite) using soundfile (robust)
-        sf.write(path, audio_data, sr)
+        # Save audio (Overwrite) using soundfile + Int16 conversion
+        audio_int16 = (audio_data * 32767).astype(np.int16)
+        sf.write(path, audio_int16, sr)
         
         # Re-Validate
         score = 0
