@@ -298,14 +298,7 @@ def format_glossary_markdown():
 
     return "\n".join(lines)
 
-def gen_single(emo_control_method,prompt, text,
-               emo_ref_path, emo_weight,
-               vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
-               emo_text,emo_random,
-               max_text_tokens_per_segment=120,
-               interval_silence=200,
-                *args, progress=gr.Progress()):
-    # Legacy wrapper for single generation (uses default device)
+def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight, vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text,emo_random, max_text_tokens_per_segment=120, interval_silence=200, *args, progress=gr.Progress()):
     # Returns (sample_rate, audio_data) for use in regeneration
     audio_result = None
     gen = gen_single_streaming(
@@ -320,9 +313,18 @@ def gen_single(emo_control_method,prompt, text,
     )
     for item in gen:
         # consume generator to get final audio data
-        if 'output_audio' in item and item['output_audio'] is not None:
+        if isinstance(item, dict) and 'output_audio' in item and item['output_audio'] is not None:
              audio_result = item['output_audio']
-    return audio_result if audio_result else (24000, np.array([]))
+    
+    # Ensure we return valid data
+    if audio_result and isinstance(audio_result, tuple) and len(audio_result) == 2:
+        sr, data = audio_result
+        if isinstance(data, np.ndarray) and data.size > 0:
+            return audio_result
+    
+    # Fallback: return empty array
+    print("[WARNING] gen_single: No valid audio generated")
+    return (24000, np.array([], dtype=np.float32))
 
 def update_prompt_audio():
     update_button = gr.update(interactive=True)
@@ -820,6 +822,11 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             return chunk_state, gr.update(), None
 
         path = target_chunk["audio_path"]
+        
+        # CRITICAL: Safety check for empty audio
+        if not isinstance(audio_data, np.ndarray) or audio_data.size == 0:
+            print("⚠️ Regeneration produced empty audio")
+            return chunk_state, gr.update(), None
         
         # CRITICAL: Normalize audio like in main generation
         # Audio from gen_single should already be normalized, but verify
