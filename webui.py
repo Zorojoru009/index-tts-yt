@@ -305,8 +305,8 @@ def gen_single(emo_control_method,prompt, text,
                interval_silence=200,
                 *args, progress=gr.Progress()):
     # Legacy wrapper for single generation (uses default device)
-    # We can just call gen_single_streaming and consume it
-    result = None
+    # Returns (sample_rate, audio_data) for use in regeneration
+    audio_result = None
     gen = gen_single_streaming(
         None, # selected_gpus (None = default)
         emo_control_method, prompt, text,
@@ -318,13 +318,10 @@ def gen_single(emo_control_method,prompt, text,
         *args, progress=progress
     )
     for item in gen:
-        # consume generator to get final file
-        if 'output_audio' in item:
-             # Streaming updates...
-             pass
-        if 'download_file' in item and item['download_file']:
-            result = item['download_file']
-    return result
+        # consume generator to get final audio data
+        if 'output_audio' in item and item['output_audio'] is not None:
+             audio_result = item['output_audio']
+    return audio_result if audio_result else (24000, np.array([]))
 
 def update_prompt_audio():
     update_button = gr.update(interactive=True)
@@ -658,8 +655,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
 
                     yield {
                         streaming_log: gr.update(value="\n".join(log_lines)),
-                        # CRITICAL FIX: Yield ONLY the new chunk. Gradio accumulates automatically when streaming=True.
-                        output_audio: (24000, chunk_np), 
+                        # Send accumulated audio (Gradio Audio streaming=True REPLACES, doesn't append)
+                        output_audio: (24000, np.concatenate(all_audio_chunks)),
                         download_file: None,
                         chunk_state: chunk_data_accumulator,
                         chunk_list: gr.update(value=df_data)
@@ -672,11 +669,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                  pass
         if len(all_audio_chunks) > 0:
             final_audio = np.concatenate(all_audio_chunks)
-            # Ensure int16
-            if final_audio.dtype == np.float32:
-                 final_audio = (final_audio * 32767).astype(np.int16)
-            
-            scipy.io.wavfile.write(output_path, 24000, final_audio)
+            # Use soundfile for consistent, safe saving
+            sf.write(output_path, final_audio, 24000, subtype='PCM_16')
             
             log_lines.append(f"✅ Generation Complete! Saved to {output_path}")
             yield {
@@ -791,9 +785,7 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             return chunk_state, gr.update(), None
 
         path = target_chunk["audio_path"]
-        path = target_chunk["audio_path"]
         # Save audio (Overwrite) using soundfile (safe PCM_16)
-        # remove manual conversion, let sf handle clipping/casting
         sf.write(path, audio_data, sr, subtype='PCM_16')
         
         # Re-Validate
