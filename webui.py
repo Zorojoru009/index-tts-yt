@@ -57,7 +57,9 @@ from indextts.utils.validation import get_validator
 from tools.i18n.i18n import I18nAuto
 import numpy as np
 import torchaudio
+import torchaudio
 import scipy.io.wavfile
+import soundfile as sf
 
 class MultiGPUManager:
     def __init__(self, cmd_args):
@@ -613,13 +615,9 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     # Save individual chunk
                     chunk_filename = f"chunk_{int(time.time())}_{chunk_idx}.wav"
                     chunk_filepath = os.path.join(chunks_dir, chunk_filename)
-                    
-                    # Convert to numpy and int16 pcm for standard WAV compatibility
-                    # Matching gen_single logic: Force conversion without conditional checks
+                    # Save individual chunk using soundfile (robust to float/int types)
                     chunk_np = item.detach().cpu().numpy().flatten()
-                    chunk_np = (chunk_np * 32767).astype(np.int16)
-                    
-                    scipy.io.wavfile.write(chunk_filepath, 24000, chunk_np)
+                    sf.write(chunk_filepath, chunk_np, 24000)
                     
                     # Phase 2: Validate
                     val_score = 0.0
@@ -723,7 +721,7 @@ def merge_chunks(chunk_state):
         for chunk in sorted_chunks:
             path = chunk.get("audio_path")
             if path and os.path.exists(path):
-                sr, data = scipy.io.wavfile.read(path)
+                data, sr = sf.read(path)
                 all_data.append(data)
             else:
                 print(f"Details: Missing chunk path {path}")
@@ -738,7 +736,7 @@ def merge_chunks(chunk_state):
         filename = f"merged_{int(time.time())}.wav"
         output_path = os.path.join(output_dir, filename)
         
-        scipy.io.wavfile.write(output_path, 24000, final_audio)
+        sf.write(output_path, final_audio, 24000)
         return output_path
     except Exception as e:
         print(f"Merge error: {e}")
@@ -790,11 +788,8 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             return chunk_state, gr.update(), None
 
         path = target_chunk["audio_path"]
-        # Save audio (Overwrite) using robust normalization
-        # Match gen_single logic: Force conversion
-        audio_data = (audio_data * 32767).astype(np.int16)
-        
-        scipy.io.wavfile.write(path, sr, audio_data)
+        # Save audio (Overwrite) using soundfile (robust)
+        sf.write(path, audio_data, sr)
         
         # Re-Validate
         score = 0
