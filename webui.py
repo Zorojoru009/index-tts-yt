@@ -655,17 +655,36 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     # Phase 2: Validate
                     val_score = 0.0
                     status_text = "Generated"
+                    transcription = ""
+                    
+                    print(f"[DEBUG] Starting validation for chunk {chunk_idx}...")
+                    print(f"  - Segment text: {segment_text[:50]}...")
+                    print(f"  - Audio file: {chunk_filepath}")
+                    print(f"  - File exists: {os.path.exists(chunk_filepath)}")
+                    
                     if validator:
-                        val_score, trans = validator.validate(segment_text, chunk_filepath)
-                        log_lines.append(f"   🔍 Match: {val_score}%")
-                        if val_score >= 90:
-                            status_text = "✅ Exact"
-                        elif val_score >= 75:
-                            status_text = "⚠️ Good"
-                        elif val_score > 0:
-                            status_text = "❌ Low"
-                        else:
+                        try:
+                            print(f"  - Validator instance: {validator}")
+                            val_score, transcription = validator.validate(segment_text, chunk_filepath)
+                            print(f"  - Validation result: score={val_score}, transcription='{transcription[:50] if transcription else 'None'}...'")
+                            log_lines.append(f"   🔍 Match: {val_score}%")
+                            if val_score >= 90:
+                                status_text = "✅ Exact"
+                            elif val_score >= 75:
+                                status_text = "⚠️ Good"
+                            elif val_score > 0:
+                                status_text = "❌ Low"
+                            else:
+                                status_text = "❓ Error"
+                        except Exception as e:
+                            print(f"  - ❌ Validation exception: {type(e).__name__}: {str(e)}")
+                            import traceback
+                            traceback.print_exc()
                             status_text = "❓ Error"
+                            val_score = 0.0
+                    else:
+                        print(f"  - ⚠️ No validator instance available")
+                        status_text = "⚠️ No STT"
                     
                     chunk_info = {
                         "index": chunk_idx,
