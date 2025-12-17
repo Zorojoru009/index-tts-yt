@@ -615,15 +615,9 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     chunk_filepath = os.path.join(chunks_dir, chunk_filename)
                     
                     # Convert to numpy and int16 pcm for standard WAV compatibility
+                    # Matching gen_single logic: Force conversion without conditional checks
                     chunk_np = item.detach().cpu().numpy().flatten()
-                    
-                    # Robust Normalization (Handle float32/float64/unclipped)
-                    if np.issubdtype(chunk_np.dtype, np.floating):
-                        chunk_np = np.clip(chunk_np, -1.0, 1.0)
-                        chunk_np = (chunk_np * 32767).astype(np.int16)
-                    elif chunk_np.itemsize != 2: # e.g. int32
-                        # Just a safeguard, unlikely path
-                        pass
+                    chunk_np = (chunk_np * 32767).astype(np.int16)
                     
                     scipy.io.wavfile.write(chunk_filepath, 24000, chunk_np)
                     
@@ -796,11 +790,9 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             return chunk_state, gr.update(), None
 
         path = target_chunk["audio_path"]
-        
         # Save audio (Overwrite) using robust normalization
-        if np.issubdtype(audio_data.dtype, np.floating):
-            audio_data = np.clip(audio_data, -1.0, 1.0)
-            audio_data = (audio_data * 32767).astype(np.int16)
+        # Match gen_single logic: Force conversion
+        audio_data = (audio_data * 32767).astype(np.int16)
         
         scipy.io.wavfile.write(path, sr, audio_data)
         
