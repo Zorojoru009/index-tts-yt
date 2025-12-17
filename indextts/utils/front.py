@@ -146,9 +146,7 @@ class TextNormalizer:
             # This prevents "rushing" and ensures punctuation is tokenized standalone for segmentation.
             text = re.sub(r'([.,!?;:])(?=[a-zA-Z])', r'\1 ', text)
 
-            # Disambiguate "No." (Number) vs "No." (Negation)
-            # If "No." is NOT followed by a digit, separate the dot so normalizer treats it as word "No" + period
-            text = re.sub(r"(\bNo)\.(?=\s+(?![0-9])|$)", r"\1 .", text)
+
             
             # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
             # 应用术语词汇表（优先级最高，在所有保护之前）
@@ -176,9 +174,7 @@ class TextNormalizer:
             try:
                 # Enforce space after punctuation if followed by a letter
                 text = re.sub(r'([.,!?;:])(?=[a-zA-Z])', r'\1 ', text)
-                
-                # Disambiguate "No." (Number) vs "No." (Negation)
-                text = re.sub(r"(\bNo)\.(?=\s+(?![0-9])|$)", r"\1 .", text)
+
                 
                 # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
                 # 应用术语词汇表（优先级最高，在所有保护之前）
