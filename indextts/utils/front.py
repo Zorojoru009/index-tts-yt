@@ -142,6 +142,10 @@ class TextNormalizer:
             print("Error, text normalizer is not initialized !!!")
             return ""
         if self.use_chinese(text):
+            # Enforce space after punctuation if followed by a letter (e.g. "Sentence.Another" -> "Sentence. Another")
+            # This prevents "rushing" and ensures punctuation is tokenized standalone for segmentation.
+            text = re.sub(r'([.,!?;:])(?=[a-zA-Z])', r'\1 ', text)
+
             # Disambiguate "No." (Number) vs "No." (Negation)
             # If "No." is NOT followed by a digit, separate the dot so normalizer treats it as word "No" + period
             text = re.sub(r"(\bNo)\.(?=\s+(?![0-9])|$)", r"\1 .", text)
@@ -170,6 +174,9 @@ class TextNormalizer:
             result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
         else:
             try:
+                # Enforce space after punctuation if followed by a letter
+                text = re.sub(r'([.,!?;:])(?=[a-zA-Z])', r'\1 ', text)
+                
                 # Disambiguate "No." (Number) vs "No." (Negation)
                 text = re.sub(r"(\bNo)\.(?=\s+(?![0-9])|$)", r"\1 .", text)
                 
