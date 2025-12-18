@@ -361,8 +361,8 @@ def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight,
     )
     for item in gen:
         # consume generator to get final audio data
-        if isinstance(item, dict) and 'output_audio' in item:
-             val = item['output_audio']
+        if isinstance(item, dict) and output_audio in item:
+             val = item[output_audio]
              # Only capture the audio if it's the actual data tuple (sr, ndarray)
              if isinstance(val, tuple):
                  audio_result = val
@@ -899,7 +899,7 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             emo_text, emo_random,
             max_text_tokens_per_segment,
             interval_silence,
-            session_id,
+            None, # CRITICAL: Don't pass session_id to inner gen! It will overwrite with a single-chunk session.
             *args
         )
         # result is (sr, audio_data)
@@ -951,13 +951,20 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
         target_chunk["score"] = score
         chunk_state[target_idx] = target_chunk
 
-        # Save session progress if we have a session ID
+        # Save session progress (Smart Update: preserve original text)
         if session_id:
-            save_session_data(session_id, {
-                "text": "N/A (Regenerated Chunk)", # We don't necessarily have the full original text here
-                "last_update": str(datetime.datetime.now()),
-                "chunks": chunk_state
-            })
+            existing_data = load_session_data(session_id)
+            if existing_data:
+                existing_data["chunks"] = chunk_state
+                existing_data["last_update"] = str(datetime.datetime.now())
+                save_session_data(session_id, existing_data)
+            else:
+                # Fallback if file was deleted
+                save_session_data(session_id, {
+                    "text": "N/A (Regenerated Chunk)",
+                    "last_update": str(datetime.datetime.now()),
+                    "chunks": chunk_state
+                })
         
         # Update Dataframe
         # Headers: ["Index", "Text Segment", "Status", "Score"]
