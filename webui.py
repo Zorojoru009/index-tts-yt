@@ -342,7 +342,10 @@ def format_glossary_markdown():
 
     return "\n".join(lines)
 
-def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight, vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, emo_text,emo_random, max_text_tokens_per_segment=120, interval_silence=200, *args, progress=gr.Progress()):
+def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight, 
+               vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, 
+               emo_text,emo_random, max_text_tokens_per_segment=120, 
+               interval_silence=200, session_id=None, *args, progress=gr.Progress()):
     # Returns (sample_rate, audio_data) for use in regeneration
     audio_result = None
     gen = gen_single_streaming(
@@ -353,6 +356,7 @@ def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight, vec1, 
         emo_text, emo_random,
         max_text_tokens_per_segment,
         interval_silence,
+        session_id,
         *args, progress=progress
     )
     for item in gen:
@@ -872,6 +876,7 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
                            emo_text, emo_random,
                            max_text_tokens_per_segment,
                            interval_silence,
+                           session_id,
                            *args): # args = advanced_params
     
     if chunk_idx is None or chunk_idx < 0 or not chunk_state:
@@ -891,6 +896,7 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             emo_text, emo_random,
             max_text_tokens_per_segment,
             interval_silence,
+            session_id,
             *args
         )
         # result is (sr, audio_data)
@@ -941,6 +947,14 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
         target_chunk["status"] = status
         target_chunk["score"] = score
         chunk_state[target_idx] = target_chunk
+
+        # Save session progress if we have a session ID
+        if session_id:
+            save_session_data(session_id, {
+                "text": "N/A (Regenerated Chunk)", # We don't necessarily have the full original text here
+                "last_update": str(datetime.datetime.now()),
+                "chunks": chunk_state
+            })
         
         # Update Dataframe
         # Headers: ["Index", "Text Segment", "Status", "Score"]
@@ -1556,6 +1570,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             emo_text, emo_random,
             max_text_tokens_per_segment,
             interval_silence,
+            current_session_id,
             *advanced_params
         ],
         outputs=[chunk_state, chunk_list, selected_chunk_audio]
