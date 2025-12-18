@@ -361,8 +361,11 @@ def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight,
     )
     for item in gen:
         # consume generator to get final audio data
-        if isinstance(item, dict) and 'output_audio' in item and item['output_audio'] is not None:
-             audio_result = item['output_audio']
+        if isinstance(item, dict) and 'output_audio' in item:
+             val = item['output_audio']
+             # Only capture the audio if it's the actual data tuple (sr, ndarray)
+             if isinstance(val, tuple):
+                 audio_result = val
     
     # Ensure we return valid data
     if audio_result and isinstance(audio_result, tuple) and len(audio_result) == 2:
