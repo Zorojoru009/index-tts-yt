@@ -138,58 +138,27 @@ class TextNormalizer:
             self.en_normalizer = NormalizerEn(overwrite_cache=False)
 
     def normalize(self, text: str) -> str:
-        if not self.zh_normalizer or not self.en_normalizer:
-            print("Error, text normalizer is not initialized !!!")
-            return ""
-        if self.use_chinese(text):
-            # Enforce space after punctuation if followed by a letter (e.g. "Sentence.Another" -> "Sentence. Another")
-            # This prevents "rushing" and ensures punctuation is tokenized standalone for segmentation.
-            text = re.sub(r'([.,!?;:])(?=[a-zA-Z])', r'\1 ', text)
+        """
+        Pure Literal Normalization:
+        Bypasses aggressive library-based expansions (like CO -> Colorado).
+        Keeps only the custom glossary and essential punctuation mapping.
+        """
+        # 1. Punctuation spacing (Essential for segmenting and breathing)
+        text = re.sub(r'([.,!?;:])(?=[a-zA-Z])', r'\1 ', text)
 
+        # 2. Custom Glossary (Highest priority)
+        if self.enable_glossary:
+            lang = "zh" if self.use_chinese(text) else "en"
+            text = self.apply_glossary_terms(text, lang=lang)
 
-            
-            # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
-            # 应用术语词汇表（优先级最高，在所有保护之前）
-            if self.enable_glossary:
-                text = self.apply_glossary_terms(text, lang="zh")
-            # 保护技术术语（如 GPT-5-nano）避免被中文normalizer错误处理
-            replaced_text, tech_list = self.save_tech_terms(text.rstrip())
-            replaced_text, pinyin_list = self.save_pinyin_tones(replaced_text)
+        # 3. Essential Punctuation Mapping (Full-width -> Half-width)
+        # We bypass zh_normalizer.normalize() and en_normalizer.normalize() entirely here.
+        # This prevents "CO" being expanded to "Colorado" inside words.
+        
+        rep_map = self.zh_char_rep_map if self.use_chinese(text) else self.char_rep_map
+        pattern = re.compile("|".join(re.escape(p) for p in rep_map.keys()))
+        result = pattern.sub(lambda x: rep_map[x.group()], text)
 
-            replaced_text, original_name_list = self.save_names(replaced_text)
-            try:
-                result = self.zh_normalizer.normalize(replaced_text)
-            except Exception:
-                result = ""
-                print(traceback.format_exc())
-            # 恢复人名
-            result = self.restore_names(result, original_name_list)
-            # 恢复拼音声调
-            result = self.restore_pinyin_tones(result, pinyin_list)
-            # 恢复技术术语
-            result = self.restore_tech_terms(result, tech_list)
-            pattern = re.compile("|".join(re.escape(p) for p in self.zh_char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.zh_char_rep_map[x.group()], result)
-        else:
-            try:
-                # Enforce space after punctuation if followed by a letter
-                text = re.sub(r'([.,!?;:])(?=[a-zA-Z])', r'\1 ', text)
-
-                
-                # text = re.sub(TextNormalizer.ENGLISH_CONTRACTION_PATTERN, r"\1 is", text, flags=re.IGNORECASE)
-                # 应用术语词汇表（优先级最高，在所有保护之前）
-                if self.enable_glossary:
-                    text = self.apply_glossary_terms(text, lang="en")
-                # 保护技术术语（如 GPT-5-Nano）避免被英文normalizer错误处理
-                replaced_text, tech_list = self.save_tech_terms(text)
-                result = self.en_normalizer.normalize(replaced_text)
-                # 恢复技术术语
-                result = self.restore_tech_terms(result, tech_list)
-            except Exception:
-                result = text
-                print(traceback.format_exc())
-            pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
-            result = pattern.sub(lambda x: self.char_rep_map[x.group()], result)
         return result
 
     def correct_pinyin(self, pinyin: str):
@@ -298,10 +267,6 @@ class TextNormalizer:
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
-        @lru_cache(maxsize=42)
-        def get_term_pattern(term: str):
-            return re.compile(re.escape(term), re.IGNORECASE)
-        transformed_text = text
         for term in sorted_terms:
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
@@ -312,8 +277,15 @@ class TextNormalizer:
             # CRITICAL: Ensure replacement is a string (YAML might parse "No" as False)
             replacement = str(replacement)
             
-            # 使用正则进行大小写不敏感的替换
-            pattern = get_term_pattern(term)
+            # Build pattern with word boundaries if term starts/ends with alphanumeric characters
+            # This prevents "CO" from matching "coward" or "No." matching "Normalization"
+            pattern_str = re.escape(term)
+            if term[0].isalnum():
+                pattern_str = r'\b' + pattern_str
+            if term[-1].isalnum():
+                pattern_str = pattern_str + r'\b'
+                
+            pattern = re.compile(pattern_str, re.IGNORECASE)
             transformed_text = pattern.sub(replacement, transformed_text)
 
         return transformed_text
