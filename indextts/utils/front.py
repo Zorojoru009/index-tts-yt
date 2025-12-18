@@ -305,9 +305,13 @@ class TextNormalizer:
         for term in sorted_terms:
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
-                replacement = term_value.get(lang, term_value.get(lang, term))
+                replacement = term_value.get(lang, term_value.get("en", term_value.get("zh", term)))
             else:
                 replacement = term_value
+            
+            # CRITICAL: Ensure replacement is a string (YAML might parse "No" as False)
+            replacement = str(replacement)
+            
             # 使用正则进行大小写不敏感的替换
             pattern = get_term_pattern(term)
             transformed_text = pattern.sub(replacement, transformed_text)
