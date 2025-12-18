@@ -1312,22 +1312,22 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
 
     def on_input_text_change(text, max_text_tokens_per_segment):
         if text and len(text) > 0:
-            text_tokens_list = tts.tokenizer.tokenize(text)
-
-            segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
-            data = []
-            for i, s in enumerate(segments):
-                segment_str = ''.join(s)
-                tokens_count = len(s)
-                data.append([i, segment_str, tokens_count])
-            return {
-                segments_preview: gr.update(value=data, visible=True, type="array"),
-            }
+            try:
+                text_tokens_list = tts.tokenizer.tokenize(text)
+                segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
+                data = []
+                for i, s in enumerate(segments):
+                    segment_str = ''.join(s)
+                    tokens_count = len(s)
+                    data.append([i, segment_str, tokens_count])
+                return gr.update(value=data, visible=True)
+            except Exception as e:
+                print(f"❌ Segment Preview Error: {e}")
+                import traceback
+                traceback.print_exc()
+                return gr.update(value=[], visible=True)
         else:
-            df = pd.DataFrame([], columns=[i18n("序号"), i18n("分句内容"), i18n("Token数")])
-            return {
-                segments_preview: gr.update(value=df),
-            }
+            return gr.update(value=[], visible=False)
 
     # 术语词汇表事件处理函数
     def on_add_glossary_term(term, reading_zh, reading_en):

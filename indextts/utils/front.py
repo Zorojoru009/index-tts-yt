@@ -267,6 +267,7 @@ class TextNormalizer:
         # 按术语长度降序排列，避免短术语先匹配导致长术语无法匹配
         # 例如："PCIe 5.0" 应该在 "PCIe" 之前匹配
         sorted_terms = sorted(self.term_glossary.keys(), key=len, reverse=True)
+        transformed_text = text
         for term in sorted_terms:
             term_value = self.term_glossary[term]
             if isinstance(term_value, dict):
