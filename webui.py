@@ -324,7 +324,7 @@ def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight, vec1, 
     
     # Fallback: return empty array
     print("[WARNING] gen_single: No valid audio generated")
-    return (24000, np.array([], dtype=np.float32))
+    return (22050, np.array([], dtype=np.float32))
 
 def update_prompt_audio():
     update_button = gr.update(interactive=True)
@@ -618,7 +618,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                 # Check silence
                 is_silence = torch.all(item == 0)
                 chunk_end_time = time.time()
-                audio_duration = item.shape[-1] / 24000 # Assume 24k
+                audio_duration = item.shape[-1] / 22050 # Assume 24k
 
                 if not is_silence:
                     chunk_idx += 1
@@ -651,7 +651,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     print(f"  - After normalization: [{chunk_np_normalized.min():.4f}, {chunk_np_normalized.max():.4f}]")
                     
                     # Ensure Float32/64 is safely clipped and saved as standard PCM_16
-                    sf.write(chunk_filepath, chunk_np_normalized, 24000, subtype='PCM_16')
+                    sf.write(chunk_filepath, chunk_np_normalized, 22050, subtype='PCM_16')
                     
                     # DEBUG: Verify saved file
                     test_load, test_sr = sf.read(chunk_filepath)
@@ -721,7 +721,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     yield {
                         streaming_log: gr.update(value="\n".join(log_lines)),
                         # Send accumulated audio (Gradio Audio streaming=True REPLACES, doesn't append)
-                        output_audio: (24000, np.concatenate(all_audio_chunks)),
+                        output_audio: (22050, np.concatenate(all_audio_chunks)),
                         download_file: None,
                         chunk_state: chunk_data_accumulator,
                         chunk_list: gr.update(value=df_data)
@@ -735,7 +735,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         if len(all_audio_chunks) > 0:
             final_audio = np.concatenate(all_audio_chunks)
             # Use soundfile for consistent, safe saving
-            sf.write(output_path, final_audio, 24000, subtype='PCM_16')
+            sf.write(output_path, final_audio, 22050, subtype='PCM_16')
             
             log_lines.append(f"✅ Generation Complete! Saved to {output_path}")
             # CRITICAL FIX: Don't re-yield audio (already sent during streaming)
@@ -800,13 +800,13 @@ def merge_chunks(chunk_state):
         output_path = os.path.join(output_dir, filename)
         
         # Enforce PCM_16 for merged file compatibility
-        sf.write(output_path, final_audio, 24000, subtype='PCM_16')
+        sf.write(output_path, final_audio, 22050, subtype='PCM_16')
         
         status_msg = f"✅ Merged {len(all_data)} chunks! Saved to: {output_path}"
         print(status_msg)
         
         # Return status, audio tuple for preview, and file path for download
-        return status_msg, (24000, final_audio), output_path
+        return status_msg, (22050, final_audio), output_path
         
     except Exception as e:
         error_msg = f"❌ Merge error: {str(e)}"
