@@ -973,6 +973,8 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
     if not session_id or session_id == "":
         session_id = f"sess_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         new_session_was_created = True
+        # CRITICAL: Save a stub file immediately so list_sessions() sees it
+        save_session_data(session_id, {"text": text, "chunks": []})
 
     if streaming_mode:
         # Use streaming mode
@@ -987,9 +989,13 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             session_id,
             *args, progress=progress
         ):
-            # CRITICAL FIX: Use the actual component object as key, not the value string
+            # CRITICAL FIX: Use the actual component object as key, and ensure value is in choices
             if new_session_was_created:
-                update_dict[session_list] = gr.update(choices=list_sessions(), value=f"{session_id}.json")
+                sess_filename = f"{session_id}.json"
+                choices = list_sessions()
+                if sess_filename not in choices:
+                   choices = [sess_filename] + choices
+                update_dict[session_list] = gr.update(choices=choices, value=sess_filename)
             
             yield update_dict
     else:
@@ -1004,13 +1010,18 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             *args, progress=progress
         )
         # Ensure all outputs in .click() are accounted for
+        sess_filename = f"{session_id}.json"
+        choices = list_sessions()
+        if new_session_was_created and sess_filename not in choices:
+            choices = [sess_filename] + choices
+            
         yield {
             streaming_log: gr.update(value="", visible=False),
             output_audio: result,
             download_file: result,
             chunk_state: [],
             chunk_list: gr.update(value=None),
-            session_list: gr.update(choices=list_sessions(), value=f"{session_id}.json") if new_session_was_created else gr.update()
+            session_list: gr.update(choices=choices, value=sess_filename) if new_session_was_created else gr.update()
         }
 
 def update_prompt_audio():
