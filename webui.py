@@ -468,13 +468,16 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         "interval_silence": int(interval_silence)
     }
     
-    # DEBUG: Log generation parameters
-    print(f"[DEBUG] Generation kwargs: {kwargs}")
-    print(f"  - Temperature: {kwargs['temperature']}")
-    print(f"  - Top P: {kwargs['top_p']}")
-    print(f"  - Top K: {kwargs['top_k']}")
-    print(f"  - Repetition Penalty: {kwargs['repetition_penalty']}")
-    print(f"  - Interval Silence: {kwargs['interval_silence']}ms")
+    # DEBUG: Log generation parameters with high visibility
+    print("\n" + "="*50)
+    print(" 🔥 [DEBUG] GENERATION PARAMETERS RECEIVED 🔥")
+    print(f" - do_sample: {kwargs['do_sample']}")
+    print(f" - temperature: {kwargs['temperature']}")
+    print(f" - top_p: {kwargs['top_p']}")
+    print(f" - top_k: {kwargs['top_k']}")
+    print(f" - repetition_penalty: {kwargs['repetition_penalty']}")
+    print(f" - interval_silence: {kwargs['interval_silence']}ms")
+    print("="*50 + "\n")
 
 
     # Convert emo_control_method from string (Gradio Radio value) to index
@@ -504,6 +507,9 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         if emo_text and emo_text.strip():
             emo_dict = tts.qwen_emo.inference(emo_text)
             vec = list(emo_dict.values())
+            # CRITICAL: Always normalize/bias even if coming from text
+            vec = tts.normalize_emo_vec(vec, apply_bias=True)
+            print(f"[DEBUG] Normalized Text Emo Vector: {vec}")
 
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
     print(f"[DEBUG] Generation params: prompt={prompt}, emo_ref_path={emo_ref_path}")
@@ -634,9 +640,9 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     # Save individual chunk using soundfile with safe float->int16 conversion
                     chunk_np = item.detach().cpu().numpy().flatten()
                     
-                    # DEBUG: Log tensor properties
-                    print(f"[DEBUG] Chunk {chunk_idx}:")
-                    print(f"  - Raw tensor shape: {item.shape}, dtype: {item.dtype}")
+                    # DEBUG: Log final sampling params reaching the model with high visibility
+                    print(f" 🔍 [MODEL-SAMPLING] do_sample={do_sample}, temp={temperature}, top_p={top_p}, top_k={top_k}")
+                    print(f" 🔍 [MODEL-SAMPLING] repetition_penalty={repetition_penalty}, max_mel_tokens={max_mel_tokens}")
                     print(f"  - Numpy shape: {chunk_np.shape}, dtype: {chunk_np.dtype}")
                     print(f"  - Value range: [{chunk_np.min():.4f}, {chunk_np.max():.4f}]")
                     

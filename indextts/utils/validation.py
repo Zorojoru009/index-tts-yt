@@ -42,7 +42,14 @@ class AudioValidator:
             # If numpy, might need handling, but we save chunks to disk anyway.
             result = self.pipeline(audio_input)
             
-            if 'text' in result:
+            # DEBUG: Log raw result
+            print(f"  [DEBUG-STT] Raw result: {result}")
+            
+            # Handle different result formats (ModelScope sometimes returns a list of dicts)
+            if isinstance(result, list) and len(result) > 0:
+                result = result[0]
+                
+            if isinstance(result, dict) and 'text' in result:
                 transcript = result['text']
             else:
                 transcript = ""
@@ -52,12 +59,16 @@ class AudioValidator:
             ref_norm = self._normalize(reference_text)
             trans_norm = self._normalize(transcript)
             
+            print(f"  [DEBUG-STT] Normalized Ref: '{ref_norm}'")
+            print(f"  [DEBUG-STT] Normalized Trans: '{trans_norm}'")
+            
             if not ref_norm and not trans_norm:
                 return 100.0, transcript # Both empty
             
             # Levenshtein Ratio: 0 to 1
             ratio = Levenshtein.ratio(ref_norm, trans_norm)
             score = round(ratio * 100, 1)
+            print(f"  [DEBUG-STT] Score: {score}")
             
             return score, transcript
             
@@ -66,9 +77,17 @@ class AudioValidator:
             return 0.0, f"[Error] {str(e)}"
 
     def _normalize(self, text):
+        if not text:
+            return ""
         import re
-        # Remove punctuation and newlines
-        text = re.sub(r'[^\w\s]', '', text)
+        # Remove SentencePiece block characters (e.g. ▁) and other non-standard symbols
+        # Some tokenizers use \u2581 (lower block), some use others.
+        text = text.replace('▁', ' ').replace('\u2581', ' ')
+        
+        # Remove punctuation and special symbols, keeping only alphanumeric and basic spaces
+        text = re.sub(r'[^\w\s]', ' ', text)
+        # Collapse multiple spaces
+        text = re.sub(r'\s+', ' ', text)
         text = text.replace('\n', ' ').replace('\r', ' ')
         return text.strip().lower()
 
