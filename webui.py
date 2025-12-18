@@ -60,6 +60,50 @@ import torchaudio
 import torchaudio
 import scipy.io.wavfile
 import soundfile as sf
+import datetime
+
+# --- Session Management Helpers ---
+SESSION_DIR = "sessions"
+os.makedirs(SESSION_DIR, exist_ok=True)
+
+def list_sessions():
+    """List available session files, sorted by newest first."""
+    if not os.path.exists(SESSION_DIR):
+        return []
+    files = [f for f in os.listdir(SESSION_DIR) if f.endswith(".json")]
+    # Sort by modification time
+    files.sort(key=lambda x: os.path.getmtime(os.path.join(SESSION_DIR, x)), reverse=True)
+    return files
+
+def save_session_data(session_id, data):
+    """Save session metadata to JSON."""
+    if not session_id:
+        return
+    path = os.path.join(SESSION_DIR, f"{session_id}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def load_session_data(session_id):
+    """Load session metadata from JSON."""
+    if not session_id:
+        return None
+    if not session_id.endswith(".json"):
+        session_id = f"{session_id}.json"
+    path = os.path.join(SESSION_DIR, session_id)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+def delete_session_file(session_id):
+    """Delete a session file."""
+    if not session_id:
+        return
+    if not session_id.endswith(".json"):
+        session_id = f"{session_id}.json"
+    path = os.path.join(SESSION_DIR, session_id)
+    if os.path.exists(path):
+        os.remove(path)
 
 class MultiGPUManager:
     def __init__(self, cmd_args):
@@ -438,6 +482,7 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         emo_text, emo_random,
                         max_text_tokens_per_segment=120,
                         interval_silence=200,
+                        session_id=None,
                         *args, progress=gr.Progress()):
     """Streaming generation with real-time progress updates"""
     # Create outputs directory if it doesn't exist
@@ -718,9 +763,16 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                     accumulated = np.concatenate(all_audio_chunks)
                     print(f"  - Accumulated audio: shape={accumulated.shape}, range=[{accumulated.min():.4f}, {accumulated.max():.4f}]")
 
+                    # Save Session Progress
+                    if session_id:
+                        save_session_data(session_id, {
+                            "text": text,
+                            "last_update": str(datetime.datetime.now()),
+                            "chunks": chunk_data_accumulator
+                        })
+
                     yield {
                         streaming_log: gr.update(value="\n".join(log_lines)),
-                        # Send accumulated audio (Gradio Audio streaming=True REPLACES, doesn't append)
                         output_audio: (22050, np.concatenate(all_audio_chunks)),
                         download_file: None,
                         chunk_state: chunk_data_accumulator,
@@ -912,12 +964,19 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                 emo_text, emo_random,
                 max_text_tokens_per_segment,
                 interval_silence, # Added interval_silence here
+                session_id,
+                session_list_comp, # Add component reference
                 *args,
                 progress=gr.Progress()):
     """Wrapper that switches between streaming and non-streaming modes"""
+    new_session_was_created = False
+    if not session_id or session_id == "":
+        session_id = f"sess_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        new_session_was_created = True
+
     if streaming_mode:
         # Use streaming mode
-        yield from gen_single_streaming(
+        for update_dict in gen_single_streaming(
             selected_gpus,
             emo_control_method, prompt, text,
             emo_ref_path, emo_weight,
@@ -925,10 +984,16 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             emo_text, emo_random,
             max_text_tokens_per_segment,
             interval_silence,
+            session_id,
             *args, progress=progress
-        )
+        ):
+            # If a new session was created, we want the dropdown to show it immediately
+            if new_session_was_created:
+                update_dict[session_list_comp] = gr.update(choices=list_sessions(), value=f"{session_id}.json")
+            
+            yield update_dict
     else:
-        # Use non-streaming mode
+        # Batch Mode (Existing logic, might also want to save session eventually)
         result = gen_single(
             emo_control_method, prompt, text,
             emo_ref_path, emo_weight,
@@ -980,6 +1045,15 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 output_audio = gr.Audio(label=i18n("Generation Result"), visible=True,key="output_audio", streaming=True)
                 download_file = gr.File(label=i18n("Download Audio"), visible=True)
         
+        # Session Management Section
+        with gr.Accordion(i18n("Session Management"), open=True):
+            with gr.Row():
+                session_list = gr.Dropdown(label=i18n("History Sessions"), choices=list_sessions(), value=None, scale=4)
+                btn_refresh_sessions = gr.Button("🔄", scale=0)
+                btn_new_session = gr.Button("🆕 " + i18n("New Session"), scale=1)
+                btn_delete_session = gr.Button("🗑️", scale=0, variant="stop")
+            current_session_id = gr.State("") # To track which file we are updating
+
         # Review Panel (Phase 1 MVP)
         with gr.Row():
             with gr.Accordion(i18n("Review & Edit Chunks"), open=True, visible=True) as review_accordion:
@@ -1351,13 +1425,19 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                          outputs=[gen_button])
 
     def on_demo_load():
-        """页面加载时重新加载glossary数据"""
+        """页面加载时重新加载glossary数据和session列表，并自动选择最近一次session"""
         try:
             tts.normalizer.load_glossary_from_yaml(tts.glossary_path)
         except Exception as e:
             gr.Error(i18n("加载词汇表时出错"))
             print(f"Failed to reload glossary on page load: {e}")
-        return gr.update(value=format_glossary_markdown())
+        
+        sessions = list_sessions()
+        default_sess = sessions[0] if sessions else None
+        return (
+            gr.update(value=format_glossary_markdown()),
+            gr.update(choices=sessions, value=default_sess)
+        )
 
     # 术语词汇表事件绑定
     btn_add_term.click(
@@ -1366,11 +1446,55 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         outputs=[glossary_table]
     )
 
-    # 页面加载时重新加载glossary
+    # 页面加载时重新加载glossary和sessions
     demo.load(
         on_demo_load,
         inputs=[],
-        outputs=[glossary_table]
+        outputs=[glossary_table, session_list]
+    )
+
+    # --- Session Management Events ---
+    def on_session_change(session_name):
+        if not session_name:
+            return "", [], None, ""
+        data = load_session_data(session_name)
+        if not data:
+            return "", [], None, session_name.replace(".json", "")
+        
+        text = data.get("text", "")
+        chunks = data.get("chunks", [])
+        df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunks]
+        session_id = session_name.replace(".json", "")
+        gr.Info(f"Loaded session: {session_id}")
+        return text, chunks, df_data, session_id
+
+    session_list.change(
+        on_session_change,
+        inputs=[session_list],
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id]
+    )
+
+    btn_refresh_sessions.click(
+        lambda: gr.update(choices=list_sessions()),
+        inputs=[],
+        outputs=[session_list]
+    )
+
+    btn_new_session.click(
+        lambda: (gr.update(value=""), [], [], "", gr.update(value=None)),
+        inputs=[],
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, session_list]
+    )
+
+    def on_delete_session_click(session_name):
+        if session_name:
+            delete_session_file(session_name)
+        return gr.update(choices=list_sessions(), value=None), gr.update(value=""), [], [], ""
+
+    btn_delete_session.click(
+        on_delete_session_click,
+        inputs=[session_list],
+        outputs=[session_list, input_text_single, chunk_state, chunk_list, current_session_id]
     )
 
     # Preload voice button handler
@@ -1389,9 +1513,11 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 emo_text, emo_random,
                 max_text_tokens_per_segment,
                 interval_silence,
+                current_session_id,
+                session_list,
                 *advanced_params,
         ],
-        outputs=[streaming_log, output_audio, download_file, chunk_state, chunk_list]
+        outputs=[streaming_log, output_audio, download_file, chunk_state, chunk_list, session_list]
     )
     
     btn_merge_all.click(
