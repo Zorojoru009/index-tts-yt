@@ -987,13 +987,13 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             session_id,
             *args, progress=progress
         ):
-            # If a new session was created, we want the dropdown to show it immediately
+            # CRITICAL FIX: Use the actual component object as key, not the value string
             if new_session_was_created:
-                update_dict[session_list_comp] = gr.update(choices=list_sessions(), value=f"{session_id}.json")
+                update_dict[session_list] = gr.update(choices=list_sessions(), value=f"{session_id}.json")
             
             yield update_dict
     else:
-        # Batch Mode (Existing logic, might also want to save session eventually)
+        # Batch Mode
         result = gen_single(
             emo_control_method, prompt, text,
             emo_ref_path, emo_weight,
@@ -1003,12 +1003,14 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             interval_silence,
             *args, progress=progress
         )
+        # Ensure all outputs in .click() are accounted for
         yield {
             streaming_log: gr.update(value="", visible=False),
             output_audio: result,
-            download_file: result,  # In batch mode, result is the file path
+            download_file: result,
             chunk_state: [],
-            chunk_list: gr.update(value=None)
+            chunk_list: gr.update(value=None),
+            session_list: gr.update(choices=list_sessions(), value=f"{session_id}.json") if new_session_was_created else gr.update()
         }
 
 def update_prompt_audio():

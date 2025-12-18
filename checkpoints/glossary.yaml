@@ -1,0 +1,22 @@
+# IndexTTS Custom Glossary
+# Format:
+# Term: Pronunciation (string for both English and Chinese)
+# OR
+# Term:
+#   en: English Pronunciation
+#   zh: Chinese Pronunciation
+
+# Example technical terms
+M.2:
+  en: M dot two
+  zh: M 二
+NVMe: N-V-M-E
+PCIe: P-C-I-E
+TTS: T-T-S
+
+# Pronunciation adjustments for common words
+# Add your own here:
+# MyBrand: My Brand
+
+There's: ders
+No.: No
