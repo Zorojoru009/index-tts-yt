@@ -346,7 +346,7 @@ def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight,
                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8, 
                emo_text,emo_random, max_text_tokens_per_segment=120, 
                interval_silence=200, session_id=None, *args, progress=gr.Progress()):
-    # Returns (sample_rate, audio_data) for use in regeneration
+    """Returns (sample_rate, audio_data) for use in regeneration or batch mode."""
     audio_result = None
     gen = gen_single_streaming(
         None, # selected_gpus (None = default)
@@ -361,11 +361,13 @@ def gen_single(emo_control_method,prompt, text, emo_ref_path, emo_weight,
     )
     for item in gen:
         # consume generator to get final audio data
-        if isinstance(item, dict) and output_audio in item:
-             val = item[output_audio]
-             # Only capture the audio if it's the actual data tuple (sr, ndarray)
-             if isinstance(val, tuple):
-                 audio_result = val
+        if isinstance(item, dict):
+            if "full_audio" in item:
+                audio_result = item["full_audio"]
+            elif output_audio in item:
+                val = item[output_audio]
+                if isinstance(val, tuple):
+                    audio_result = val
     
     # Ensure we return valid data
     if audio_result and isinstance(audio_result, tuple) and len(audio_result) == 2:
@@ -780,7 +782,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
 
                     yield {
                         streaming_log: gr.update(value="\n".join(log_lines)),
-                        output_audio: (22050, np.concatenate(all_audio_chunks)),
+                        output_audio: (22050, chunk_np_normalized), # YIELD ONLY DELTA (fixes duplication)
+                        "full_audio": (22050, np.concatenate(all_audio_chunks)), # FOR INTERNAL USE (regeneration)
                         download_file: None,
                         chunk_state: chunk_data_accumulator,
                         chunk_list: gr.update(value=df_data)
