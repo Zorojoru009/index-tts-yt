@@ -66,6 +66,10 @@ import datetime
 SESSION_DIR = "sessions"
 os.makedirs(SESSION_DIR, exist_ok=True)
 
+# Global trackers for active generations to prevent duplication
+ACTIVE_SESSIONS = set()
+SESSION_LOCK = threading.Lock()
+
 def list_sessions():
     """List available session files, sorted by newest first."""
     if not os.path.exists(SESSION_DIR):
@@ -494,331 +498,235 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         session_id=None,
                         *args, progress=gr.Progress()):
     """Streaming generation with real-time progress updates"""
-    # Create outputs directory if it doesn't exist
-    output_dir = "outputs"
-    os.makedirs(output_dir, exist_ok=True)
-
-    output_path = None
-    if not output_path:
-        output_path = os.path.join(output_dir, f"spk_{int(time.time())}.wav")
-    
-    # set gradio progress
-    tts.gr_progress = progress
-    
-    # CRITICAL: Upack args to match advanced_params from UI
-    # UI sends: [do_sample, top_p, top_k, temperature, length_penalty, num_beams, repetition_penalty, max_mel_tokens]
-    do_sample, top_p, top_k, temperature, \
-        length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
-    
-    kwargs = {
-        "do_sample": bool(do_sample),
-        "top_p": float(top_p),
-        "top_k": int(top_k) if int(top_k) > 0 else None,
-        "temperature": float(temperature),
-        "repetition_penalty": float(repetition_penalty),
-        "length_penalty": float(length_penalty),
-        "num_beams": int(num_beams),
-        "max_mel_tokens": int(max_mel_tokens),
-        "interval_silence": int(interval_silence)
-    }
-    
-    # DEBUG: Log generation parameters with high visibility
-    print("\n" + "="*50)
-    print(" 🔥 [DEBUG] GENERATION PARAMETERS RECEIVED 🔥")
-    print(f" - do_sample: {kwargs['do_sample']}")
-    print(f" - temperature: {kwargs['temperature']}")
-    print(f" - top_p: {kwargs['top_p']}")
-    print(f" - top_k: {kwargs['top_k']}")
-    print(f" - repetition_penalty: {kwargs['repetition_penalty']}")
-    print(f" - interval_silence: {kwargs['interval_silence']}ms")
-    print("="*50 + "\n")
-
-
-    # Convert emo_control_method from string (Gradio Radio value) to index
-    if isinstance(emo_control_method, str):
-        try:
-            emo_control_method = EMO_CHOICES_ALL.index(emo_control_method)
-        except ValueError:
-            emo_control_method = 0  # Default to speaker emotion
-    elif not isinstance(emo_control_method, int):
-        emo_control_method = 0
-
-    if emo_text == "":
-        # erase empty emotion descriptions; `infer()` will then automatically use the main prompt
-        emo_text = None
-
-    # Handle emotion control vectors
-    vec = None
-    if emo_control_method == 0:  # emotion from speaker
-        emo_ref_path = None  # remove external reference audio
-        vec = None
-    elif emo_control_method == 1:  # emotion from reference audio
-        vec = None
-    elif emo_control_method == 2:  # emotion from custom vectors
-        vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        vec = tts.normalize_emo_vec(vec, apply_bias=True)
-    elif emo_control_method == 3:  # emotion from text
-        if emo_text and emo_text.strip():
-            emo_dict = tts.qwen_emo.inference(emo_text)
-            vec = list(emo_dict.values())
-            # CRITICAL: Always normalize/bias even if coming from text
-            vec = tts.normalize_emo_vec(vec, apply_bias=True)
-            print(f"[DEBUG] Normalized Text Emo Vector: {vec}")
-
-    print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
-    print(f"[DEBUG] Generation params: prompt={prompt}, emo_ref_path={emo_ref_path}")
-    
-    # Calculate segments for progress tracking using primary model
-    text_tokens_list = tts.tokenizer.tokenize(text)
-    segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
-    total_segments = len(segments)
-    
-    # Determine target GPUs
-    target_gpus = []
-    if selected_gpus:
-        for g in selected_gpus:
-            if "CPU" in g:
-                target_gpus.append(-1)  # CPU device ID
-            else:
-                try:
-                    gpu_id = int(g.split(":")[0].replace("GPU ", ""))
-                    target_gpus.append(gpu_id)
-                except (ValueError, IndexError):
-                    target_gpus.append(multi_gpu_manager.default_device_id)
-    else:
-        target_gpus = [multi_gpu_manager.default_device_id]
-
-    if not target_gpus: target_gpus = [0]
-    
-    # Initialize log
-    log_lines = []
-    log_lines.append(f"🎙️ Starting generation...")
-    log_lines.append(f"🖥️ Using GPUs: {target_gpus}")
-    log_lines.append(f"📊 Total segments: {total_segments}")
-    log_lines.append(f"📝 Text length: {len(text)} characters, {len(text_tokens_list)} tokens")
-    log_lines.append(f"⚙️ Chunk size: {max_text_tokens_per_segment} tokens/segment")
-    log_lines.append("-" * 50)
-    
-    # Show initial log
-    yield {
-        streaming_log: gr.update(value="\n".join(log_lines), visible=True),
-        output_audio: None,
-        download_file: None
-    }
-    
-    # Start streaming generation
-    start_time = time.time()
-    chunk_times = []
+    # Session Locking check
+    if session_id:
+        with SESSION_LOCK:
+            if session_id in ACTIVE_SESSIONS:
+                yield {
+                    streaming_log: gr.update(value=f"⚠️ {i18n('This session is already being generated in the background.')}\n{i18n('Please wait for it to finish or check the Chunks List.')}", visible=True)
+                }
+                return
+            ACTIVE_SESSIONS.add(session_id)
     
     try:
-        # Use distributed inference if multiple GPUs selected
-        if len(target_gpus) > 1:
-            # For distributed mode, don't pass output_path to avoid race conditions
-            # We'll save the concatenated file ourselves after all chunks are done
-            print(f">> Using distributed inference on GPUs: {target_gpus}")
-            generator = multi_gpu_manager.infer_distributed(
-                target_gpus,
-                text=text,
-                spk_audio_prompt=prompt,
-                output_path=None,  # Don't save in distributed mode - we'll concatenate and save after
-                emo_audio_prompt=emo_ref_path,
-                emo_alpha=emo_weight,
-                emo_vector=vec,
-                use_emo_text=(emo_control_method==3),
-                emo_text=emo_text,
-                use_random=emo_random,
-                verbose=cmd_args.verbose,
-                max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-                stream_return=True,
-                **kwargs
-            )
+        output_dir = "outputs"
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_path = os.path.join(output_dir, f"spk_{int(time.time())}.wav")
+        
+        # set gradio progress
+        tts.gr_progress = progress
+        
+        # CRITICAL: Upack args to match advanced_params from UI
+        do_sample, top_p, top_k, temperature, \
+            length_penalty, num_beams, repetition_penalty, max_mel_tokens = args
+        
+        kwargs = {
+            "do_sample": bool(do_sample),
+            "top_p": float(top_p),
+            "top_k": int(top_k) if int(top_k) > 0 else None,
+            "temperature": float(temperature),
+            "repetition_penalty": float(repetition_penalty),
+            "length_penalty": float(length_penalty),
+            "num_beams": int(num_beams),
+            "max_mel_tokens": int(max_mel_tokens),
+            "interval_silence": int(interval_silence)
+        }
+        
+        # DEBUG Log
+        print(f" 🔥 [DEBUG] GENERATION START 🔥 Session: {session_id}")
+
+        # Convert emo_control_method
+        if isinstance(emo_control_method, str):
+            try:
+                emo_control_method = EMO_CHOICES_ALL.index(emo_control_method)
+            except ValueError:
+                emo_control_method = 0
+        elif not isinstance(emo_control_method, int):
+            emo_control_method = 0
+
+        if emo_text == "":
+            emo_text = None
+
+        # Handle emotion control vectors
+        vec = None
+        if emo_control_method == 0:  # emotion from speaker
+            emo_ref_path = None
+            vec = None
+        elif emo_control_method == 1:  # emotion from reference audio
+            vec = None
+        elif emo_control_method == 2:  # emotion from custom vectors
+            vec = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
+            vec = tts.normalize_emo_vec(vec, apply_bias=True)
+        elif emo_control_method == 3:  # emotion from text
+            if emo_text and emo_text.strip():
+                emo_dict = tts.qwen_emo.inference(emo_text)
+                vec = list(emo_dict.values())
+                vec = tts.normalize_emo_vec(vec, apply_bias=True)
+
+        # Calculate segments
+        text_tokens_list = tts.tokenizer.tokenize(text)
+        segments = tts.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
+        total_segments = len(segments)
+        
+        # Determine target GPUs
+        target_gpus = []
+        if selected_gpus:
+            for g in selected_gpus:
+                if "CPU" in g: target_gpus.append(-1)
+                else:
+                    try:
+                        gpu_id = int(g.split(":")[0].replace("GPU ", ""))
+                        target_gpus.append(gpu_id)
+                    except: target_gpus.append(multi_gpu_manager.default_device_id)
         else:
-            # Single GPU - can use model's internal saving
-            print(f">> Using single GPU inference on GPU: {target_gpus[0]}")
-            model = multi_gpu_manager.get_model(target_gpus[0])
-            generator = model.infer_generator(
-                spk_audio_prompt=prompt,
-                text=text,
-                output_path=output_path,
-                emo_audio_prompt=emo_ref_path,
-                emo_alpha=emo_weight,
-                emo_vector=vec,
-                use_emo_text=(emo_control_method==3),
-                emo_text=emo_text,
-                use_random=emo_random,
-                verbose=cmd_args.verbose,
-                max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-                stream_return=True,
-                **kwargs
-            )
+            target_gpus = [multi_gpu_manager.default_device_id]
+        if not target_gpus: target_gpus = [0]
         
+        # Initialize log/state
+        log_lines = [f"🎙️ Starting generation...", f"🖥️ Using GPUs: {target_gpus}", f"📊 Total segments: {total_segments}"]
         chunk_idx = 0
-        all_audio_chunks = []  # Accumulate all chunks for final concatenation
-        
-        # Phase 1: Chunk Data Accumulator
-        chunk_data_accumulator = [] 
+        all_audio_chunks = []
+        chunk_data_accumulator = []
         chunks_dir = os.path.join(output_dir, "chunks")
         os.makedirs(chunks_dir, exist_ok=True)
         
-        # Phase 2: Initialize Validator (Lazy)
+        # Initialize Validator
         validator = None
-        try:
-             validator = get_validator()
-        except:
-             pass
+        try: validator = get_validator()
+        except: pass
 
-        for item in generator:
-            if isinstance(item, torch.Tensor):
-                # Check silence
-                is_silence = torch.all(item == 0)
-                chunk_end_time = time.time()
-                audio_duration = item.shape[-1] / 22050 # Assume 24k
+        # --- SMART RESUME CHECK ---
+        resumed_count = 0
+        if session_id:
+            existing_data = load_session_data(session_id)
+            if existing_data and "chunks" in existing_data:
+                existing_chunks = existing_data["chunks"]
+                for i, segment in enumerate(segments):
+                    segment_text = "".join(segment).replace(' ', ' ').replace(' ', ' ')
+                    # Try to find matching chunk
+                    found_match = False
+                    if i < len(existing_chunks):
+                        ec = existing_chunks[i]
+                        if ec["text"] == segment_text and ec.get("audio_path") and os.path.exists(ec["audio_path"]):
+                            found_match = True
+                            chunk_idx += 1
+                            resumed_count += 1
+                            
+                            # Load and accumulate
+                            chunk_audio, sr = sf.read(ec["audio_path"])
+                            all_audio_chunks.append(chunk_audio)
+                            chunk_data_accumulator.append(ec)
+                            
+                            log_lines.append(f"🚀 Chunk {chunk_idx}/{total_segments} resumed from disk (matches text)")
+                            
+                            # Yield progress
+                            df_data = [[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator]
+                            yield {
+                                streaming_log: gr.update(value="\n".join(log_lines)),
+                                chunk_state: chunk_data_accumulator,
+                                chunk_list: gr.update(value=df_data)
+                            }
+                    
+                    if not found_match:
+                        break # Start REAL generation from here
+        
+        # Calculate remaining text
+        remaining_segments = segments[resumed_count:]
+        if remaining_segments:
+            remaining_text = "".join(["".join(s) for s in remaining_segments])
+            log_lines.append(f"🛠️ Generating remaining {len(remaining_segments)} segments...")
+            yield {streaming_log: gr.update(value="\n".join(log_lines))}
 
-                if not is_silence:
-                    chunk_idx += 1
-                    chunk_duration = chunk_end_time - start_time if chunk_idx == 1 else chunk_end_time - chunk_times[-1]
-                    chunk_times.append(chunk_end_time)
-
-                    rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
-
-                    raw_text = ''.join(segments[chunk_idx-1]) if chunk_idx <= len(segments) else "End"
-                    segment_text = raw_text.replace(' ', ' ').replace(' ', ' ')
-
-                    log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed in {chunk_duration:.2f}s")
-                    log_lines.append(f"   📊 RTF: {rtf:.4f} | Audio: {audio_duration:.2f}s")
-                    log_lines.append(f"   📝 Text: {segment_text[:50]}...")
-                    
-                    # Save individual chunk
-                    chunk_filename = f"chunk_{int(time.time())}_{chunk_idx}.wav"
-                    chunk_filepath = os.path.join(chunks_dir, chunk_filename)
-                    # Save individual chunk using soundfile with safe float->int16 conversion
-                    chunk_np = item.detach().cpu().numpy().flatten()
-                    
-                    # DEBUG: Log final sampling params reaching the model with high visibility
-                    print(f" 🔍 [MODEL-SAMPLING] do_sample={do_sample}, temp={temperature}, top_p={top_p}, top_k={top_k}")
-                    print(f" 🔍 [MODEL-SAMPLING] repetition_penalty={repetition_penalty}, max_mel_tokens={max_mel_tokens}")
-                    print(f"  - Numpy shape: {chunk_np.shape}, dtype: {chunk_np.dtype}")
-                    print(f"  - Value range: [{chunk_np.min():.4f}, {chunk_np.max():.4f}]")
-                    
-                    # CRITICAL FIX: Model outputs int16-scale floats, normalize to -1.0..1.0
-                    chunk_np_normalized = chunk_np / 32767.0
-                    print(f"  - After normalization: [{chunk_np_normalized.min():.4f}, {chunk_np_normalized.max():.4f}]")
-                    
-                    # Ensure Float32/64 is safely clipped and saved as standard PCM_16
-                    sf.write(chunk_filepath, chunk_np_normalized, 22050, subtype='PCM_16')
-                    
-                    # DEBUG: Verify saved file
-                    test_load, test_sr = sf.read(chunk_filepath)
-                    print(f"  - After save/load: shape={test_load.shape}, dtype={test_load.dtype}, sr={test_sr}")
-                    print(f"  - After save/load range: [{test_load.min():.4f}, {test_load.max():.4f}]")
-                    
-                    # Phase 2: Validate
-                    val_score = 0.0
-                    status_text = "Generated"
-                    transcription = ""
-                    
-                    print(f"[DEBUG] Starting validation for chunk {chunk_idx}...")
-                    print(f"  - Segment text: {segment_text[:50]}...")
-                    print(f"  - Audio file: {chunk_filepath}")
-                    print(f"  - File exists: {os.path.exists(chunk_filepath)}")
-                    
-                    if validator:
-                        try:
-                            print(f"  - Validator instance: {validator}")
-                            val_score, transcription = validator.validate(segment_text, chunk_filepath)
-                            print(f"  - Validation result: score={val_score}, transcription='{transcription[:50] if transcription else 'None'}...'")
-                            log_lines.append(f"   🔍 Match: {val_score}%")
-                            if val_score >= 90:
-                                status_text = "✅ Exact"
-                            elif val_score >= 75:
-                                status_text = "⚠️ Good"
-                            elif val_score > 0:
-                                status_text = "❌ Low"
-                            else:
-                                status_text = "❓ Error"
-                        except Exception as e:
-                            print(f"  - ❌ Validation exception: {type(e).__name__}: {str(e)}")
-                            import traceback
-                            traceback.print_exc()
-                            status_text = "❓ Error"
-                            val_score = 0.0
-                    else:
-                        print(f"  - ⚠️ No validator instance available")
-                        status_text = "⚠️ No STT"
-                    
-                    chunk_info = {
-                        "index": chunk_idx,
-                        "text": segment_text,
-                        "audio_path": chunk_filepath,
-                        "status": status_text,
-                        "score": val_score
-                    }
-                    chunk_data_accumulator.append(chunk_info)
-                    
-                    # Format for Dataframe: [Index, Text, Status, Score]
-                    df_data = [[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator]
-
-                    # Estimate remaining time
-                    if chunk_idx < total_segments:
-                        avg_chunk_time = (chunk_end_time - start_time) / chunk_idx
-                        remaining_chunks = total_segments - chunk_idx
-                        eta = avg_chunk_time * remaining_chunks
-                        log_lines.append(f"   ⏳ ETA: {eta:.1f}s")
-
-                    # CRITICAL FIX: Use normalized audio for accumulation
-                    all_audio_chunks.append(chunk_np_normalized)
-                    
-                    # DEBUG: Log accumulation
-                    accumulated = np.concatenate(all_audio_chunks)
-                    print(f"  - Accumulated audio: shape={accumulated.shape}, range=[{accumulated.min():.4f}, {accumulated.max():.4f}]")
-
-                    # Save Session Progress
-                    if session_id:
-                        save_session_data(session_id, {
-                            "text": text,
-                            "last_update": str(datetime.datetime.now()),
-                            "chunks": chunk_data_accumulator
-                        })
-
-                    yield {
-                        streaming_log: gr.update(value="\n".join(log_lines)),
-                        output_audio: (22050, chunk_np_normalized), # YIELD ONLY DELTA (fixes duplication)
-                        "full_audio": (22050, np.concatenate(all_audio_chunks)), # FOR INTERNAL USE (regeneration)
-                        download_file: None,
-                        chunk_state: chunk_data_accumulator,
-                        chunk_list: gr.update(value=df_data)
-                    }
-                else:
-                    # Silence chunk.. handle if needed
-                    pass
-            elif isinstance(item, dict):
-                 # Handle status updates from generator if any
-                 pass
-        if len(all_audio_chunks) > 0:
-            final_audio = np.concatenate(all_audio_chunks)
-            # Use soundfile for consistent, safe saving
-            sf.write(output_path, final_audio, 22050, subtype='PCM_16')
+            start_time = time.time()
+            chunk_times = []
             
-            log_lines.append(f"✅ Generation Complete! Saved to {output_path}")
-            # CRITICAL FIX: Don't re-yield audio (already sent during streaming)
-            # Only update log and download file to avoid duplication
+            # Use appropriate inference engine
+            if len(target_gpus) > 1:
+                generator = multi_gpu_manager.infer_distributed(
+                    target_gpus, text=remaining_text, spk_audio_prompt=prompt, output_path=None,
+                    emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight, emo_vector=vec,
+                    use_emo_text=(emo_control_method==3), emo_text=emo_text, use_random=emo_random,
+                    verbose=cmd_args.verbose, max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                    stream_return=True, **kwargs
+                )
+            else:
+                model = multi_gpu_manager.get_model(target_gpus[0])
+                generator = model.infer_generator(
+                    spk_audio_prompt=prompt, text=remaining_text, output_path=output_path,
+                    emo_audio_prompt=emo_ref_path, emo_alpha=emo_weight, emo_vector=vec,
+                    use_emo_text=(emo_control_method==3), emo_text=emo_text, use_random=emo_random,
+                    verbose=cmd_args.verbose, max_text_tokens_per_segment=int(max_text_tokens_per_segment),
+                    stream_return=True, **kwargs
+                )
+
+            for item in generator:
+                if isinstance(item, torch.Tensor):
+                    is_silence = torch.all(item == 0)
+                    if not is_silence:
+                        chunk_idx += 1
+                        chunk_end_time = time.time()
+                        audio_duration = item.shape[-1] / 22050
+                        chunk_duration = chunk_end_time - start_time if not chunk_times else chunk_end_time - chunk_times[-1]
+                        chunk_times.append(chunk_end_time)
+                        
+                        rtf = chunk_duration / audio_duration if audio_duration > 0 else 0
+                        segment_text = "".join(segments[chunk_idx-1]).replace(' ', ' ').replace(' ', ' ')
+
+                        log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed ({chunk_duration:.1f}s)")
+                        
+                        # Save & Normalize
+                        chunk_filename = f"chunk_{int(time.time())}_{chunk_idx}.wav"
+                        chunk_filepath = os.path.join(chunks_dir, chunk_filename)
+                        chunk_np_normalized = item.detach().cpu().numpy().flatten() / 32767.0
+                        sf.write(chunk_filepath, chunk_np_normalized, 22050, subtype='PCM_16')
+
+                        # Validate
+                        val_score, status_text = 0.0, "Generated"
+                        if validator:
+                            try:
+                                val_score, _ = validator.validate(segment_text, chunk_filepath)
+                                status_text = "✅ Exact" if val_score >= 90 else "⚠️ Good" if val_score >= 75 else "❌ Low" if val_score > 0 else "❓ Error"
+                            except: status_text = "❓ Error"
+                        
+                        chunk_info = {"index": chunk_idx, "text": segment_text, "audio_path": chunk_filepath, "status": status_text, "score": val_score}
+                        chunk_data_accumulator.append(chunk_info)
+                        all_audio_chunks.append(chunk_np_normalized)
+                        
+                        # Save Progress
+                        if session_id:
+                            save_session_data(session_id, {"text": text, "last_update": str(datetime.datetime.now()), "chunks": chunk_data_accumulator})
+                        
+                        df_data = [[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator]
+                        yield {
+                            streaming_log: gr.update(value="\n".join(log_lines)),
+                            output_audio: (22050, chunk_np_normalized),
+                            "full_audio": (22050, np.concatenate(all_audio_chunks)),
+                            chunk_state: chunk_data_accumulator,
+                            chunk_list: gr.update(value=df_data)
+                        }
+
+        # Final Finish
+        if all_audio_chunks:
+            final_audio = np.concatenate(all_audio_chunks)
+            sf.write(output_path, final_audio, 22050, subtype='PCM_16')
+            log_lines.append(f"✅ Finished! Saved to {output_path}")
             yield {
                 streaming_log: gr.update(value="\n".join(log_lines)),
-                output_audio: gr.update(),  # Don't update (keeps last streamed audio)
+                output_audio: gr.update(),
                 download_file: output_path,
                 chunk_state: chunk_data_accumulator,
-                chunk_list: gr.update(value=df_data)
+                chunk_list: gr.update(value=[[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator])
             }
 
     except Exception as e:
-        log_lines.append("=" * 50)
-        log_lines.append(f"❌ Error: {str(e)}")
-        log_lines.append("=" * 50)
-        yield {
-            streaming_log: gr.update(value="\n".join(log_lines)),
-            output_audio: None,
-            download_file: None
-        }
+        import traceback
+        traceback.print_exc()
+        yield {streaming_log: gr.update(value=f"❌ Error: {str(e)}", visible=True)}
+    finally:
+        if session_id:
+            with SESSION_LOCK:
+                ACTIVE_SESSIONS.discard(session_id)
 
 def on_select_chunk(evt: gr.SelectData, chunk_state):
     if not chunk_state:
