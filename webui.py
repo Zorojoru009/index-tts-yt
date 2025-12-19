@@ -597,18 +597,26 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         except: pass
 
         # --- SMART RESUME CHECK ---
+        def norm_for_match(t):
+            # Normalize text for comparison by removing whitespace and making it lowercase
+            return "".join(t.split()).lower().replace('…', '...')
+
         resumed_count = 0
         if session_id:
             existing_data = load_session_data(session_id)
             if existing_data and "chunks" in existing_data:
                 existing_chunks = existing_data["chunks"]
+                print(f"🕵️ Checking resume for session {session_id} ({len(existing_chunks)} existing chunks)")
+                
                 for i, segment in enumerate(segments):
                     segment_text = "".join(segment).replace(' ', ' ').replace(' ', ' ')
                     # Try to find matching chunk
                     found_match = False
                     if i < len(existing_chunks):
                         ec = existing_chunks[i]
-                        if ec["text"] == segment_text and ec.get("audio_path") and os.path.exists(ec["audio_path"]):
+                        
+                        # Robust comparison
+                        if norm_for_match(ec["text"]) == norm_for_match(segment_text) and ec.get("audio_path") and os.path.exists(ec["audio_path"]):
                             found_match = True
                             chunk_idx += 1
                             resumed_count += 1
@@ -618,15 +626,23 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                             all_audio_chunks.append(chunk_audio)
                             chunk_data_accumulator.append(ec)
                             
-                            log_lines.append(f"🚀 Chunk {chunk_idx}/{total_segments} resumed from disk (matches text)")
+                            log_lines.append(f"🚀 Chunk {chunk_idx}/{total_segments} resumed from disk")
                             
-                            # Yield progress
+                            # Yield progress (CRITICAL: Yield current audio so UI player fills up)
                             df_data = [[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator]
                             yield {
                                 streaming_log: gr.update(value="\n".join(log_lines)),
+                                output_audio: (22050, chunk_audio), # Update player with resumed chunk
+                                "full_audio": (22050, np.concatenate(all_audio_chunks)),
                                 chunk_state: chunk_data_accumulator,
                                 chunk_list: gr.update(value=df_data)
                             }
+                        else:
+                            # Log why it didn't match
+                            if i < len(existing_chunks):
+                                print(f"  ❌ Match failed for chunk {i+1}:")
+                                print(f"     Target: '{norm_for_match(segment_text)}'")
+                                print(f"     Stored: '{norm_for_match(ec['text'])}'")
                     
                     if not found_match:
                         break # Start REAL generation from here
