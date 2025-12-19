@@ -1465,7 +1465,9 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 session_list,
                 *advanced_params,
         ],
-        outputs=[streaming_log, output_audio, download_file, chunk_state, chunk_list, session_list]
+        outputs=[streaming_log, output_audio, download_file, chunk_state, chunk_list, session_list],
+        concurrency_limit=10,
+        concurrency_id="generation"
     )
     
     btn_merge_all.click(
@@ -1494,9 +1496,17 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             current_session_id,
             *advanced_params
         ],
-        outputs=[chunk_state, chunk_list, selected_chunk_audio]
+        outputs=[chunk_state, chunk_list, selected_chunk_audio],
+        concurrency_limit=5,
+        concurrency_id="regeneration"
     )
 
 if __name__ == "__main__":
-    demo.queue(20)
-    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port)
+    # Optimize queue for stability and long-running sessions
+    demo.queue(default_concurrency_limit=32)
+    demo.launch(
+        server_name=cmd_args.host, 
+        server_port=cmd_args.port,
+        show_api=False,
+        max_threads=64
+    )
