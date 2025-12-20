@@ -596,9 +596,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         try: validator = get_validator()
         except: pass
 
-        # --- FAIL-SAFE PROMPT CHECK ---
-        if prompt is None or (isinstance(prompt, str) and not os.path.exists(prompt)):
-             log_lines.append("❌ Error: Voice prompt audio is missing or invalid.")
+        if prompt is None or (isinstance(prompt, str) and (prompt == "" or not os.path.exists(prompt))):
+             log_lines.append("❌ Error: Voice prompt audio is missing or invalid. Please upload a voice reference.")
              yield {
                  streaming_log: gr.update(value="\n".join(log_lines), visible=True),
                  output_audio: None
@@ -1432,17 +1431,17 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         if not data:
             return "", [], None, session_name.replace(".json", "")
         
-        text = data.get("text", "")
-        chunks = data.get("chunks", [])
         prompt_path = data.get("prompt_path")
-        # Ensure it's a valid string or None for Gradio
+        # Legacy support: If prompt_path is missing, don't overwrite the current UI value
         if not prompt_path or not isinstance(prompt_path, str):
-            prompt_path = None
+            prompt_component_update = gr.update() # No change
+        else:
+            prompt_component_update = prompt_path
         
         df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunks]
         session_id = session_name.replace(".json", "")
         gr.Info(f"Loaded session: {session_id}")
-        return text, chunks, df_data, session_id, prompt_path
+        return text, chunks, df_data, session_id, prompt_component_update
 
     session_list.change(
         on_session_change,
