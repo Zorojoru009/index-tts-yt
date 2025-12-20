@@ -749,16 +749,17 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
 
 def on_select_chunk(evt: gr.SelectData, chunk_state):
     if not chunk_state:
-        return "", None, -1
+        return "", None, -1, "### " + i18n("Select a segment to edit")
     
     # evt.index is [row, col]
     row_idx = evt.index[0]
     if row_idx < 0 or row_idx >= len(chunk_state):
-        return "", None, -1
+        return "", None, -1, "### " + i18n("Select a segment to edit")
         
     chunk = chunk_state[row_idx]
-    # Return text, audio_path, index
-    return chunk["text"], chunk["audio_path"], chunk["index"]
+    index = chunk["index"]
+    # Return text, audio_path, index, label
+    return chunk["text"], chunk["audio_path"], index, f"### {i18n('Currently Editing')}: {i18n('Segment')} #{index}"
 
 def merge_chunks(chunk_state):
     """Concatenate all chunks in the state into one file"""
@@ -1039,6 +1040,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         )
                     with gr.Column(scale=2):
                         selected_chunk_idx = gr.Number(label=i18n("Chunk Index"), visible=False, value=-1)
+                        selected_chunk_label = gr.Markdown("### " + i18n("Select a segment to edit"))
                         selected_chunk_text = gr.Textbox(label=i18n("Edit Text Segment"), lines=4, interactive=True)
                         selected_chunk_audio = gr.Audio(label=i18n("Chunk Preview"), type="filepath")
                         btn_regen_chunk = gr.Button(i18n("Regenerate This Chunk"), variant="secondary")
@@ -1441,12 +1443,12 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunks]
         session_id = session_name.replace(".json", "")
         gr.Info(f"Loaded session: {session_id}")
-        return text, chunks, df_data, session_id, prompt_component_update
+        return text, chunks, df_data, session_id, prompt_component_update, "### " + i18n("Select a segment to edit")
 
     session_list.change(
         on_session_change,
         inputs=[session_list],
-        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio]
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio, selected_chunk_label]
     )
 
     btn_refresh_sessions.click(
@@ -1456,20 +1458,20 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     )
 
     btn_new_session.click(
-        lambda: (gr.update(value=""), [], [], "", gr.update(value=None), gr.update(value=None)),
+        lambda: (gr.update(value=""), [], [], "", gr.update(value=None), gr.update(value=None), "### " + i18n("Select a segment to edit")),
         inputs=[],
-        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, session_list, prompt_audio]
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, session_list, prompt_audio, selected_chunk_label]
     )
 
     def on_delete_session_click(session_name):
         if session_name:
             delete_session_file(session_name)
-        return gr.update(choices=list_sessions(), value=None), gr.update(value=""), [], [], "", gr.update(value=None)
+        return gr.update(choices=list_sessions(), value=None), gr.update(value=""), [], [], "", gr.update(value=None), "### " + i18n("Select a segment to edit")
 
     btn_delete_session.click(
         on_delete_session_click,
         inputs=[session_list],
-        outputs=[session_list, input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio]
+        outputs=[session_list, input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio, selected_chunk_label]
     )
 
     # Preload voice button handler
@@ -1506,7 +1508,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     chunk_list.select(
         fn=on_select_chunk,
         inputs=[chunk_state],
-        outputs=[selected_chunk_text, selected_chunk_audio, selected_chunk_idx]
+        outputs=[selected_chunk_text, selected_chunk_audio, selected_chunk_idx, selected_chunk_label]
     )
 
 
