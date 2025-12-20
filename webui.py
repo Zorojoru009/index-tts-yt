@@ -596,6 +596,15 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
         try: validator = get_validator()
         except: pass
 
+        # --- FAIL-SAFE PROMPT CHECK ---
+        if prompt is None or (isinstance(prompt, str) and not os.path.exists(prompt)):
+             log_lines.append("❌ Error: Voice prompt audio is missing or invalid.")
+             yield {
+                 streaming_log: gr.update(value="\n".join(log_lines), visible=True),
+                 output_audio: None
+             }
+             return
+
         # --- SMART RESUME CHECK ---
         def norm_for_match(t):
             return "".join(t.split()).lower().replace('…', '...')
@@ -698,9 +707,14 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         chunk_data_accumulator.append(chunk_info)
                         all_audio_chunks.append(chunk_np_normalized)
                         
-                        # Save Progress
+                        # Save Progress (Including prompt_path for future regens/resumes)
                         if session_id:
-                            save_session_data(session_id, {"text": text, "last_update": str(datetime.datetime.now()), "chunks": chunk_data_accumulator})
+                            save_session_data(session_id, {
+                                "text": text, 
+                                "prompt_path": prompt,
+                                "last_update": str(datetime.datetime.now()), 
+                                "chunks": chunk_data_accumulator
+                            })
                         
                         # LEAN YIELD: Don't concatenate everything every time. Just send delta.
                         df_data = [[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator]
@@ -914,8 +928,8 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
     if not session_id or session_id == "":
         session_id = f"sess_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
         new_session_was_created = True
-        # CRITICAL: Save a stub file immediately so list_sessions() sees it
-        save_session_data(session_id, {"text": text, "chunks": []})
+        # Store metadata stub immediately
+        save_session_data(session_id, {"text": text, "prompt_path": prompt, "chunks": []})
 
     if streaming_mode:
         # Use streaming mode
@@ -939,6 +953,7 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                 update_dict[session_list] = gr.update(choices=choices, value=sess_filename)
             
             # Filter out internal/string keys before yielding to Gradio
+            # We strictly only yield keys that are Component objects
             ui_update = {k: v for k, v in update_dict.items() if not isinstance(k, str)}
             yield ui_update
     else:
@@ -1419,15 +1434,20 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         
         text = data.get("text", "")
         chunks = data.get("chunks", [])
+        prompt_path = data.get("prompt_path")
+        # Ensure it's a valid string or None for Gradio
+        if not prompt_path or not isinstance(prompt_path, str):
+            prompt_path = None
+        
         df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunks]
         session_id = session_name.replace(".json", "")
         gr.Info(f"Loaded session: {session_id}")
-        return text, chunks, df_data, session_id
+        return text, chunks, df_data, session_id, prompt_path
 
     session_list.change(
         on_session_change,
         inputs=[session_list],
-        outputs=[input_text_single, chunk_state, chunk_list, current_session_id]
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio]
     )
 
     btn_refresh_sessions.click(
@@ -1437,20 +1457,20 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     )
 
     btn_new_session.click(
-        lambda: (gr.update(value=""), [], [], "", gr.update(value=None)),
+        lambda: (gr.update(value=""), [], [], "", gr.update(value=None), gr.update(value=None)),
         inputs=[],
-        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, session_list]
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, session_list, prompt_audio]
     )
 
     def on_delete_session_click(session_name):
         if session_name:
             delete_session_file(session_name)
-        return gr.update(choices=list_sessions(), value=None), gr.update(value=""), [], [], ""
+        return gr.update(choices=list_sessions(), value=None), gr.update(value=""), [], [], "", gr.update(value=None)
 
     btn_delete_session.click(
         on_delete_session_click,
         inputs=[session_list],
-        outputs=[session_list, input_text_single, chunk_state, chunk_list, current_session_id]
+        outputs=[session_list, input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio]
     )
 
     # Preload voice button handler
