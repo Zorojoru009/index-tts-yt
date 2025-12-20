@@ -938,7 +938,9 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
                    choices = [sess_filename] + choices
                 update_dict[session_list] = gr.update(choices=choices, value=sess_filename)
             
-            yield update_dict
+            # Filter out internal/string keys before yielding to Gradio
+            ui_update = {k: v for k, v in update_dict.items() if not isinstance(k, str)}
+            yield ui_update
     else:
         # Batch Mode
         result = gen_single(
