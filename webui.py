@@ -1556,6 +1556,8 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         if not data:
             return "", [], None, session_name.replace(".json", "")
         
+        text = data.get("text", "")
+        chunks = data.get("chunks", [])
         prompt_path = data.get("prompt_path")
         # Legacy support: If prompt_path is missing, don't overwrite the current UI value
         if not prompt_path or not isinstance(prompt_path, str):
