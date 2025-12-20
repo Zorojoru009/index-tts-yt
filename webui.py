@@ -685,7 +685,14 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                         chunk_duration = chunk_end_time - start_time if not chunk_times else chunk_end_time - chunk_times[-1]
                         chunk_times.append(chunk_end_time)
                         
-                        segment_text = "".join(segments[chunk_idx-1]).replace(' ', ' ').replace(' ', ' ')
+                        # --- INDEX ERROR GUARD ---
+                        if chunk_idx - 1 < len(segments):
+                            segment_text = "".join(segments[chunk_idx-1]).replace(' ', ' ').replace(' ', ' ')
+                        else:
+                            # Edge case: engine yielded more chunks than pre-calculated segments
+                            segment_text = f"[Segment alignment mismatch - Chunk {chunk_idx}]"
+                            print(f"⚠️ Warning: Segment index out of range (Chunk {chunk_idx}, Total segments {total_segments})")
+
                         log_lines.append(f"✅ Chunk {chunk_idx}/{total_segments} completed ({chunk_duration:.1f}s)")
                         
                         # Save & Normalize
@@ -911,6 +918,115 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
         return chunk_state, gr.update(), None
 
 
+def batch_regenerate_handler(indices_str, chunk_state, 
+                            emo_control_method, prompt, 
+                            emo_ref_path, emo_weight,
+                            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                            emo_text, emo_random,
+                            max_text_tokens_per_segment,
+                            interval_silence,
+                            session_id,
+                            *args):
+    """Loop through multiple indices and regenerate them sequentially"""
+    if not indices_str or not chunk_state:
+        yield chunk_state, gr.update(), "### ⚠️ " + i18n("No indices or chunks provided")
+        return
+
+    # Parse indices (handle both half-width and full-width commas)
+    indices = []
+    for x in indices_str.replace("，", ",").split(","):
+        x = x.strip()
+        if x.isdigit():
+            indices.append(int(x))
+    
+    if not indices:
+        yield chunk_state, gr.update(), "### ⚠️ " + i18n("Invalid indices format")
+        return
+
+    # Handle emo_control_method conversion if it's a string
+    if isinstance(emo_control_method, str):
+        try: emo_control_method = EMO_CHOICES_ALL.index(emo_control_method)
+        except ValueError: emo_control_method = 0
+
+    total = len(indices)
+    processed = 0
+    
+    for idx in indices:
+        processed += 1
+        yield chunk_state, gr.update(), f"### 🔄 {i18n('Batch Progress')}: {processed}/{total} ({i18n('Segment')} #{idx})"
+        
+        # Find the chunk in state
+        target_chunk = None
+        target_idx_in_state = -1
+        for i, c in enumerate(chunk_state):
+            if c["index"] == idx:
+                target_chunk = c
+                target_idx_in_state = i
+                break
+        
+        if not target_chunk:
+            print(f"Skipping index {idx}: Not found in current session")
+            continue
+            
+        try:
+            # Inference (gen_single returns (sr, audio_data))
+            # result = (22050, audio_numpy)
+            sr, audio_data = gen_single(
+                emo_control_method, prompt, target_chunk["text"],
+                emo_ref_path, emo_weight,
+                vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+                emo_text, emo_random,
+                max_text_tokens_per_segment,
+                interval_silence,
+                None, # CRITICAL: Don't pass session_id to inner gen
+                *args
+            )
+            
+            if not isinstance(audio_data, np.ndarray) or audio_data.size == 0:
+                print(f"⚠️ Chunk {idx} produced empty audio")
+                continue
+            
+            # Save & Update
+            path = target_chunk["audio_path"]
+            # Normalize for saving
+            audio_normalized = audio_data / 32767.0 if np.max(np.abs(audio_data)) > 1.0 else audio_data
+            sf.write(path, audio_normalized, sr, subtype='PCM_16')
+            
+            # Re-Validate
+            score, status = 0, "Regenerated"
+            try:
+                validator = get_validator()
+                if validator:
+                    score, _ = validator.validate(target_chunk["text"], path)
+                    if score >= 90: status = "✅ Regen"
+                    elif score >= 75: status = "⚠️ Regen"
+                    else: status = "❌ Regen"
+            except: pass
+            
+            # Update state
+            target_chunk["status"] = status
+            target_chunk["score"] = score
+            chunk_state[target_idx_in_state] = target_chunk
+            
+            # Save session progress immediately after each chunk
+            if session_id:
+                existing_data = load_session_data(session_id)
+                if existing_data:
+                    existing_data["chunks"] = chunk_state
+                    existing_data["last_update"] = str(datetime.datetime.now())
+                    save_session_data(session_id, existing_data)
+            
+            # Update Dataframe list
+            df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunk_state]
+            yield chunk_state, gr.update(value=df_data), f"### 🔄 {i18n('Batch Progress')}: {processed}/{total} ({i18n('Segment')} #{idx} {i18n('Done')})"
+            
+        except Exception as e:
+            print(f"Batch regen error on index {idx}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    yield chunk_state, gr.update(), f"### ✅ {i18n('Batch Complete')}! {processed}/{total} {i18n('processed')}"
 
 
 def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
@@ -1044,6 +1160,13 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                         selected_chunk_text = gr.Textbox(label=i18n("Edit Text Segment"), lines=4, interactive=True)
                         selected_chunk_audio = gr.Audio(label=i18n("Chunk Preview"), type="filepath")
                         btn_regen_chunk = gr.Button(i18n("Regenerate This Chunk"), variant="secondary")
+                        
+                        # Batch Regeneration Section
+                        gr.Markdown("---")
+                        with gr.Row():
+                            batch_regen_indices = gr.Textbox(label=i18n("Batch Indices (e.g. 1,3,5)"), placeholder="1, 2, 3", scale=3)
+                            btn_batch_regen = gr.Button("🚀 " + i18n("Batch Regen"), variant="primary", scale=2)
+                        batch_regen_status = gr.Markdown(visible=False)
                         
                         # Merge Section
                         gr.Markdown("---")
@@ -1254,7 +1377,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                 for i, s in enumerate(segments):
                     segment_str = ''.join(s)
                     tokens_count = len(s)
-                    data.append([i, segment_str, tokens_count])
+                    data.append([i + 1, segment_str, tokens_count])
                 return gr.update(value=data, visible=True)
             except Exception as e:
                 print(f"❌ Segment Preview Error: {e}")
@@ -1443,12 +1566,12 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunks]
         session_id = session_name.replace(".json", "")
         gr.Info(f"Loaded session: {session_id}")
-        return text, chunks, df_data, session_id, prompt_component_update, "### " + i18n("Select a segment to edit")
+        return text, chunks, df_data, session_id, prompt_component_update, "### " + i18n("Select a segment to edit"), gr.update(value="", visible=False), gr.update(value="")
 
     session_list.change(
         on_session_change,
         inputs=[session_list],
-        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio, selected_chunk_label]
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio, selected_chunk_label, batch_regen_status, batch_regen_indices]
     )
 
     btn_refresh_sessions.click(
@@ -1458,20 +1581,20 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     )
 
     btn_new_session.click(
-        lambda: (gr.update(value=""), [], [], "", gr.update(value=None), gr.update(value=None), "### " + i18n("Select a segment to edit")),
+        lambda: (gr.update(value=""), [], [], "", gr.update(value=None), gr.update(value=None), "### " + i18n("Select a segment to edit"), gr.update(value="", visible=False), gr.update(value="")),
         inputs=[],
-        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, session_list, prompt_audio, selected_chunk_label]
+        outputs=[input_text_single, chunk_state, chunk_list, current_session_id, session_list, prompt_audio, selected_chunk_label, batch_regen_status, batch_regen_indices]
     )
 
     def on_delete_session_click(session_name):
         if session_name:
             delete_session_file(session_name)
-        return gr.update(choices=list_sessions(), value=None), gr.update(value=""), [], [], "", gr.update(value=None), "### " + i18n("Select a segment to edit")
+        return gr.update(choices=list_sessions(), value=None), gr.update(value=""), [], [], "", gr.update(value=None), "### " + i18n("Select a segment to edit"), gr.update(value="", visible=False), gr.update(value="")
 
     btn_delete_session.click(
         on_delete_session_click,
         inputs=[session_list],
-        outputs=[session_list, input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio, selected_chunk_label]
+        outputs=[session_list, input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio, selected_chunk_label, batch_regen_status, batch_regen_indices]
     )
 
     # Preload voice button handler
@@ -1526,6 +1649,23 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
             *advanced_params
         ],
         outputs=[chunk_state, chunk_list, selected_chunk_audio],
+        concurrency_limit=5,
+        concurrency_id="regeneration"
+    )
+
+    btn_batch_regen.click(
+        fn=batch_regenerate_handler,
+        inputs=[
+            batch_regen_indices, chunk_state,
+            emo_control_method, prompt_audio, emo_upload, emo_weight,
+            vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8,
+            emo_text, emo_random,
+            max_text_tokens_per_segment,
+            interval_silence,
+            current_session_id,
+            *advanced_params
+        ],
+        outputs=[chunk_state, chunk_list, batch_regen_status],
         concurrency_limit=5,
         concurrency_id="regeneration"
     )
