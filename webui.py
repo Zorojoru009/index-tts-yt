@@ -1535,7 +1535,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                          outputs=[gen_button])
 
     def on_demo_load():
-        """页面加载时重新加载glossary数据和session列表，并自动选择最近一次session"""
+        """页面加载时重新加载glossary数据和session列表，并自动选择并加载最近一次session的完整数据"""
         try:
             tts.normalizer.load_glossary_from_yaml(tts.glossary_path)
         except Exception as e:
@@ -1544,9 +1544,43 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         
         sessions = list_sessions()
         default_sess = sessions[0] if sessions else None
+        
+        # CRITICAL FIX: Actually LOAD the session data, don't just set dropdown
+        if default_sess:
+            data = load_session_data(default_sess)
+            if data:
+                text = data.get("text", "")
+                chunks = data.get("chunks", [])
+                prompt_path = data.get("prompt_path")
+                
+                # Prepare outputs
+                if not prompt_path or not isinstance(prompt_path, str):
+                    prompt_component_update = gr.update()
+                else:
+                    prompt_component_update = prompt_path
+                
+                df_data = [[c["index"], c["text"], c["status"], c.get("score", 0)] for c in chunks]
+                session_id = default_sess.replace(".json", "")
+                
+                return (
+                    gr.update(value=format_glossary_markdown()),
+                    gr.update(choices=sessions, value=default_sess),
+                    text,  # input_text_single
+                    chunks,  # chunk_state
+                    df_data,  # chunk_list
+                    session_id,  # current_session_id
+                    prompt_component_update  # prompt_audio
+                )
+        
+        # Fallback: no session to load
         return (
             gr.update(value=format_glossary_markdown()),
-            gr.update(choices=sessions, value=default_sess)
+            gr.update(choices=sessions, value=default_sess),
+            "",  # input_text_single
+            [],  # chunk_state
+            [],  # chunk_list
+            "",  # current_session_id
+            gr.update()  # prompt_audio
         )
 
     # 术语词汇表事件绑定
@@ -1556,11 +1590,11 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
         outputs=[glossary_table]
     )
 
-    # 页面加载时重新加载glossary和sessions
+    # 页面加载时重新加载glossary和sessions，并恢复最后一个session的完整状态
     demo.load(
         on_demo_load,
         inputs=[],
-        outputs=[glossary_table, session_list]
+        outputs=[glossary_table, session_list, input_text_single, chunk_state, chunk_list, current_session_id, prompt_audio]
     )
 
     # --- Session Management Events ---
