@@ -604,6 +604,27 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
              }
              return
 
+        # --- SKELETON CHUNK PRE-POPULATION ---
+        # Create placeholder entries for ALL segments so user sees full scope
+        chunk_data_accumulator = []
+        for i, seg in enumerate(segments):
+            chunk_data_accumulator.append({
+                "index": i + 1,
+                "text": "".join(seg).replace(' ', ' ').replace(' ', ' '),
+                "audio_path": None,  # Not generated yet
+                "status": "⏳ Pending",
+                "score": 0
+            })
+        
+        # Yield skeleton immediately so user sees all expected segments
+        df_data = [[c["index"], c["text"], c["status"], c["score"]] for c in chunk_data_accumulator]
+        log_lines.append(f"📋 Initialized {total_segments} segments")
+        yield {
+            streaming_log: gr.update(value="\n".join(log_lines)),
+            chunk_state: chunk_data_accumulator,
+            chunk_list: gr.update(value=df_data)
+        }
+
         # --- SMART RESUME CHECK ---
         def norm_for_match(t):
             return "".join(t.split()).lower().replace('…', '...')
@@ -627,7 +648,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                             
                             chunk_audio, sr = sf.read(ec["audio_path"])
                             all_audio_chunks.append(chunk_audio)
-                            chunk_data_accumulator.append(ec)
+                            # Update skeleton entry instead of appending
+                            chunk_data_accumulator[i] = ec
                         else:
                             if i < len(existing_chunks):
                                 print(f"  ❌ Match failed for chunk {i+1}")
@@ -710,7 +732,8 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                             except: status_text = "❓ Error"
                         
                         chunk_info = {"index": chunk_idx, "text": segment_text, "audio_path": chunk_filepath, "status": status_text, "score": val_score}
-                        chunk_data_accumulator.append(chunk_info)
+                        # UPDATE skeleton entry instead of appending
+                        chunk_data_accumulator[chunk_idx - 1] = chunk_info
                         all_audio_chunks.append(chunk_np_normalized)
                         
                         # Save Progress (Including prompt_path for future regens/resumes)
@@ -871,7 +894,15 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             print("Chunk not found in state")
             return chunk_state, gr.update(), None
 
+        # Handle pending chunks (never generated)
         path = target_chunk["audio_path"]
+        if path is None or not os.path.exists(path):
+            # Create new path for pending chunk
+            session_dir = os.path.join(SESSION_DIR, session_id) if session_id else SESSION_DIR
+            chunks_dir = os.path.join(session_dir, "chunks")
+            os.makedirs(chunks_dir, exist_ok=True)
+            path = os.path.join(chunks_dir, f"chunk_{int(time.time())}_{idx}.wav")
+            print(f"🆕 Generating pending chunk {idx} for first time")
         
         # CRITICAL: Safety check for empty audio
         if not isinstance(audio_data, np.ndarray) or audio_data.size == 0:
@@ -983,6 +1014,16 @@ def batch_regenerate_handler(indices_str, chunk_state,
             continue
             
         try:
+            # Handle pending chunks (never generated)
+            path = target_chunk["audio_path"]
+            if path is None or not os.path.exists(path):
+                # Create new path for pending chunk
+                session_dir = os.path.join(SESSION_DIR, session_id) if session_id else SESSION_DIR
+                chunks_dir = os.path.join(session_dir, "chunks")
+                os.makedirs(chunks_dir, exist_ok=True)
+                path = os.path.join(chunks_dir, f"chunk_{int(time.time())}_{idx}.wav")
+                print(f"🆕 Batch generating pending chunk {idx} for first time")
+            
             # Inference (gen_single returns (sr, audio_data))
             # result = (22050, audio_numpy)
             sr, audio_data = gen_single(
