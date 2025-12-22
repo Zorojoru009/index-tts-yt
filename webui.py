@@ -733,7 +733,21 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
 
         # Final Finish
         if all_audio_chunks:
-            final_audio = np.concatenate(all_audio_chunks)
+            # Add inter-segment silence for natural pacing
+            if len(all_audio_chunks) > 1 and interval_silence > 0:
+                silence_samples = int(22050 * (interval_silence / 1000.0))
+                silence_chunk = np.zeros(silence_samples, dtype=np.float32)
+                
+                chunks_with_padding = []
+                for i, chunk in enumerate(all_audio_chunks):
+                    chunks_with_padding.append(chunk)
+                    if i < len(all_audio_chunks) - 1:  # Don't add silence after last chunk
+                        chunks_with_padding.append(silence_chunk)
+                
+                final_audio = np.concatenate(chunks_with_padding)
+            else:
+                final_audio = np.concatenate(all_audio_chunks)
+            
             sf.write(output_path, final_audio, 22050, subtype='PCM_16')
             log_lines.append(f"✅ Finished! Saved to {output_path}")
             yield {
@@ -1152,7 +1166,8 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                             datatype=["number", "str", "str", "number"],
                             interactive=False,
                             label=i18n("Chunks List"),
-                            max_height=400
+                            max_height=400,
+                            row_count="dynamic"  # Enable row highlighting
                         )
                     with gr.Column(scale=2):
                         selected_chunk_idx = gr.Number(label=i18n("Chunk Index"), visible=False, value=-1)
@@ -1551,10 +1566,10 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     # --- Session Management Events ---
     def on_session_change(session_name):
         if not session_name:
-            return "", [], None, ""
+            return "", [], None, "", gr.update(), "### " + i18n("Select a segment to edit"), gr.update(value="", visible=False), gr.update(value="")
         data = load_session_data(session_name)
         if not data:
-            return "", [], None, session_name.replace(".json", "")
+            return "", [], None, session_name.replace(".json", ""), gr.update(), "### " + i18n("Select a segment to edit"), gr.update(value="", visible=False), gr.update(value="")
         
         text = data.get("text", "")
         chunks = data.get("chunks", [])
