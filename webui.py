@@ -753,6 +753,11 @@ def gen_single_streaming(selected_gpus, emo_control_method, prompt, text,
                             chunk_state: chunk_data_accumulator,
                             chunk_list: gr.update(value=df_data)
                         }
+                    else:
+                        # Yield silence chunks to the player for live pacing feedback
+                        yield {
+                            output_audio: (22050, item.detach().cpu().numpy().flatten())
+                        }
 
         # Final Finish
         if all_audio_chunks:
@@ -805,7 +810,7 @@ def on_select_chunk(evt: gr.SelectData, chunk_state):
     # Return text, audio_path, index, label
     return chunk["text"], chunk["audio_path"], index, f"### {i18n('Currently Editing')}: {i18n('Segment')} #{index}"
 
-def merge_chunks(chunk_state):
+def merge_chunks(chunk_state, interval_silence=200):
     """Concatenate all chunks in the state into one file"""
     if not chunk_state:
         return "⚠️ No chunks to merge", None, None
@@ -826,7 +831,18 @@ def merge_chunks(chunk_state):
         if not all_data:
             return "❌ No valid audio chunks found", None, None
             
-        final_audio = np.concatenate(all_data)
+        if len(all_data) > 1 and interval_silence > 0:
+            silence_samples = int(22050 * (interval_silence / 1000.0))
+            silence_chunk = np.zeros(silence_samples, dtype=np.float32)
+            
+            chunks_with_padding = []
+            for i, chunk in enumerate(all_data):
+                chunks_with_padding.append(chunk)
+                if i < len(all_data) - 1:
+                    chunks_with_padding.append(silence_chunk)
+            final_audio = np.concatenate(chunks_with_padding)
+        else:
+            final_audio = np.concatenate(all_data)
         
         output_dir = "outputs"
         os.makedirs(output_dir, exist_ok=True)
@@ -1126,6 +1142,11 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             # Filter out internal/string keys before yielding to Gradio
             # We strictly only yield keys that are Component objects
             ui_update = {k: v for k, v in update_dict.items() if not isinstance(k, str)}
+            
+            # Special case: map "full_audio" string key to the actual output component
+            if "full_audio" in update_dict:
+                ui_update[output_audio] = update_dict["full_audio"]
+                
             yield ui_update
     else:
         # Batch Mode
@@ -1136,6 +1157,7 @@ def gen_wrapper(streaming_mode, selected_gpus, emo_control_method, prompt, text,
             emo_text, emo_random,
             max_text_tokens_per_segment,
             interval_silence,
+            session_id,  # Add missing session_id
             *args, progress=progress
         )
         # Ensure all outputs in .click() are accounted for
@@ -1716,7 +1738,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
     
     btn_merge_all.click(
         fn=merge_chunks,
-        inputs=[chunk_state],
+        inputs=[chunk_state, interval_silence],
         outputs=[merge_status, merged_audio_preview, download_file]
     )
     # Phase 1: Chunk List Event
