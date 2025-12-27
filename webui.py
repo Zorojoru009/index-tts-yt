@@ -917,8 +917,8 @@ def regenerate_chunk_handler(chunk_idx, new_text, chunk_state,
             session_dir = os.path.join(SESSION_DIR, session_id) if session_id else SESSION_DIR
             chunks_dir = os.path.join(session_dir, "chunks")
             os.makedirs(chunks_dir, exist_ok=True)
-            path = os.path.join(chunks_dir, f"chunk_{int(time.time())}_{idx}.wav")
-            print(f"🆕 Generating pending chunk {idx} for first time")
+            path = os.path.join(chunks_dir, f"chunk_{int(time.time())}_{chunk_idx}.wav")
+            print(f"🆕 Generating pending chunk {chunk_idx} for first time")
         
         # CRITICAL: Safety check for empty audio
         if not isinstance(audio_data, np.ndarray) or audio_data.size == 0:
