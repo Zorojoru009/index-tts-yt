@@ -1039,7 +1039,7 @@ def batch_regenerate_handler(indices_str, chunk_state,
                 os.makedirs(chunks_dir, exist_ok=True)
                 path = os.path.join(chunks_dir, f"chunk_{int(time.time())}_{idx}.wav")
                 print(f"🆕 Batch generating pending chunk {idx} for first time")
-            
+
             # Inference (gen_single returns (sr, audio_data))
             # result = (22050, audio_numpy)
             sr, audio_data = gen_single(
@@ -1052,13 +1052,12 @@ def batch_regenerate_handler(indices_str, chunk_state,
                 None, # CRITICAL: Don't pass session_id to inner gen
                 *args
             )
-            
+
             if not isinstance(audio_data, np.ndarray) or audio_data.size == 0:
                 print(f"⚠️ Chunk {idx} produced empty audio")
                 continue
-            
-            # Save & Update
-            path = target_chunk["audio_path"]
+
+            # Save & Update (use the path we determined above, which may be newly created)
             # Normalize for saving
             audio_normalized = audio_data / 32767.0 if np.max(np.abs(audio_data)) > 1.0 else audio_data
             sf.write(path, audio_normalized, sr, subtype='PCM_16')
@@ -1074,7 +1073,8 @@ def batch_regenerate_handler(indices_str, chunk_state,
                     else: status = "❌ Regen"
             except: pass
             
-            # Update state
+            # Update state (including the path in case it was newly created)
+            target_chunk["audio_path"] = path
             target_chunk["status"] = status
             target_chunk["score"] = score
             chunk_state[target_idx_in_state] = target_chunk
